@@ -1,0 +1,18 @@
+{
+  "source_id": "synthetic-highway",
+  "note": "합성 테스트 데이터 — 실제 카메라가 아닙니다.",
+  "cameras": [
+    {
+      "provider_camera_id": "HWY-B-001",
+      "name": "합성 고속도로 1지점",
+      "latitude": 36.99973,
+      "longitude": 127.025337,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성고속도로",
+      "road_direction": "동행",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z"
+    }
+  ]
+}

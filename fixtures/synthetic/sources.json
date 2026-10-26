@@ -1,0 +1,39 @@
+{
+  "note": "합성 테스트 소스 — 실제 기관·주소·절차가 아닙니다.",
+  "sources": [
+    {
+      "id": "synthetic-city",
+      "provider_name": "합성 도시 교통 CCTV (테스트용)",
+      "environment": "synthetic",
+      "capabilities": [
+        "catalog",
+        "preservation_request"
+      ],
+      "official_endpoint": "https://city-cctv.example.invalid/api",
+      "terms_url": "https://city-cctv.example.invalid/terms",
+      "preservation_procedure": "합성 예시: 제공처 민원 창구에 영상정보 보존·열람 신청서를 제출 (실제 절차 아님)",
+      "provider_retention_days": 30,
+      "adapter": {
+        "type": "json_file",
+        "path": "cameras_city.json"
+      }
+    },
+    {
+      "id": "synthetic-highway",
+      "provider_name": "합성 고속도로 CCTV (테스트용)",
+      "environment": "synthetic",
+      "capabilities": [
+        "catalog",
+        "preservation_request"
+      ],
+      "official_endpoint": "https://highway-cctv.example.invalid/api",
+      "terms_url": "https://highway-cctv.example.invalid/terms",
+      "preservation_procedure": "합성 예시: 고객센터 보존 요청 (실제 절차 아님)",
+      "provider_retention_days": 7,
+      "adapter": {
+        "type": "json_file",
+        "path": "cameras_highway.json"
+      }
+    }
+  ]
+}

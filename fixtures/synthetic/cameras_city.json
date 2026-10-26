@@ -1,0 +1,111 @@
+{
+  "source_id": "synthetic-city",
+  "note": "합성 테스트 데이터 — 실제 카메라가 아닙니다.",
+  "cameras": [
+    {
+      "provider_camera_id": "CAM-A-008",
+      "name": "합성 1교차로",
+      "latitude": 36.99973,
+      "longitude": 127.008446,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성대로",
+      "road_direction": "동행",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z"
+    },
+    {
+      "provider_camera_id": "CAM-A-001",
+      "name": "합성 2교차로",
+      "latitude": 37.000225,
+      "longitude": 127.040539,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성대로",
+      "road_direction": "동행",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z"
+    },
+    {
+      "provider_camera_id": "CAM-A-003",
+      "name": "합성 지하차도 출구",
+      "latitude": 36.99982,
+      "longitude": 127.067564,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성대로",
+      "road_direction": "북행",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z",
+      "clock": {
+        "reference_time": "2026-10-25T15:00:00Z",
+        "offset_seconds": 0,
+        "uncertainty_seconds": 5,
+        "drift_seconds_per_day": 1.0,
+        "note": "합성 예시: 제공처가 NTP 동기화를 고지했다고 가정"
+      }
+    },
+    {
+      "provider_camera_id": "CAM-A-005",
+      "name": "합성 3교차로",
+      "latitude": 37.01349,
+      "longitude": 127.067902,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성로",
+      "road_direction": "북행",
+      "status": "inactive",
+      "observed_at": "2026-10-25T15:00:00Z",
+      "clock": {
+        "reference_time": "2026-10-25T15:00:00Z",
+        "offset_seconds": 0,
+        "uncertainty_seconds": 5,
+        "drift_seconds_per_day": 1.0,
+        "note": "합성 예시: 제공처가 NTP 동기화를 고지했다고 가정"
+      }
+    },
+    {
+      "provider_camera_id": "CAM-A-006",
+      "name": "합성 4교차로",
+      "latitude": 37.02698,
+      "longitude": 127.067226,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성로",
+      "road_direction": "북행",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z"
+    },
+    {
+      "provider_camera_id": "CAM-A-002",
+      "name": "합성 사고지점 교차로",
+      "latitude": 37.043167,
+      "longitude": 127.068015,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성로",
+      "road_direction": "북행",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z",
+      "clock": {
+        "reference_time": "2026-10-25T15:00:00Z",
+        "offset_seconds": 0,
+        "uncertainty_seconds": 5,
+        "drift_seconds_per_day": 1.0,
+        "note": "합성 예시: 제공처가 NTP 동기화를 고지했다고 가정"
+      }
+    },
+    {
+      "provider_camera_id": "CAM-A-004",
+      "name": "합성 외곽 공원",
+      "latitude": 37.017986,
+      "longitude": 127.033782,
+      "location_uncertainty_m": 10,
+      "coverage_radius_m": 100,
+      "road_name": "합성공원로",
+      "road_direction": "양방향",
+      "status": "active",
+      "observed_at": "2026-10-25T15:00:00Z"
+    }
+  ]
+}
