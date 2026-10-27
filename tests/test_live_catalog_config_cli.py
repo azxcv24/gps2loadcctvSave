@@ -128,6 +128,9 @@ class TestItsCatalog:
         url = its.fresh_url(cam["id"])
         assert len(fake.calls) > calls and url != cam["stream_url"]
         calls = len(fake.calls)
+        its.fresh_url(cam["id"], force=True)  # 방금 받은 주소면 반복 호출하지 않음
+        assert len(fake.calls) == calls
+        clock["now"] += timedelta(seconds=61)
         its.fresh_url(cam["id"], force=True)  # 403 등으로 강제 갱신
         assert len(fake.calls) > calls
 

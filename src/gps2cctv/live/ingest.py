@@ -35,6 +35,9 @@ log = logging.getLogger(__name__)
 KNOT_TO_MPS = 0.514444
 HDOP_TO_METERS = 5.0
 MAX_FUTURE_SKEW = timedelta(minutes=5)
+# 앱의 오프라인 버퍼링으로 늦게 오는 위치는 받되, 이보다 오래된 위치는 잘못된 값으로 본다.
+MAX_PAST_AGE = timedelta(days=30)
+REQUEST_TIMEOUT_SECONDS = 15
 
 
 class IngestError(Gps2CctvError):
@@ -110,6 +113,8 @@ def _validate(fix: Fix) -> Fix:
         raise IngestError("좌표가 0,0 입니다(위치 미확정).")
     if fix.recorded_at > fix.received_at + MAX_FUTURE_SKEW:
         raise IngestError("위치 기록 시각이 현재보다 미래입니다.")
+    if fix.recorded_at < fix.received_at - MAX_PAST_AGE:
+        raise IngestError("위치 기록 시각이 너무 오래되었습니다.")
     if fix.accuracy_m is not None and fix.accuracy_m < 0:
         return Fix(**{**fix.__dict__, "accuracy_m": None})
     return fix
@@ -241,7 +246,7 @@ def parse_request(
     if is_json:
         try:
             root = json.loads(body.decode("utf-8"))
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
             raise IngestError("JSON 형식이 올바르지 않습니다.") from exc
         return parse_json(root, received_at)
     params = parse_qs(query, keep_blank_values=False)
@@ -280,6 +285,7 @@ class GpsHttpServer:
 
         class Handler(BaseHTTPRequestHandler):
             server_version = "gps2cctv"
+            timeout = REQUEST_TIMEOUT_SECONDS  # 느린 연결이 스레드를 붙잡지 않도록
             sys_version = ""
 
             def log_message(self, format: str, *args: Any) -> None:
@@ -307,8 +313,12 @@ class GpsHttpServer:
                 self._handle(b"")
 
             def do_POST(self) -> None:
-                length = int(self.headers.get("Content-Length") or 0)
-                if length > outer.max_body_bytes:
+                try:
+                    length = int(self.headers.get("Content-Length") or 0)
+                except ValueError:
+                    self._reply(400)
+                    return
+                if length < 0 or length > outer.max_body_bytes:
                     self._reply(413)
                     return
                 self._handle(self.rfile.read(length) if length > 0 else b"")

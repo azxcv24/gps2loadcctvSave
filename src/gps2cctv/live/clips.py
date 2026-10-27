@@ -22,6 +22,7 @@ import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import Any
 
 from .. import __version__, audit
 from ..config import Settings
@@ -67,6 +68,8 @@ class ClipPlan:
     flags: set[str] = field(default_factory=set)
     capped: bool = False
     attempts: int = 0
+    # 이 클립을 자를 녹화기(녹화기가 바뀌어도 예약 당시 버퍼를 쓰도록)
+    recorder: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -373,6 +376,17 @@ def set_protected(
     return bool(cursor.rowcount)
 
 
+def _files_size(row: sqlite3.Row) -> int:
+    total = 0
+    for key in ("original_path", "viewing_path", "metadata_path"):
+        if row[key]:
+            try:
+                total += Path(row[key]).stat().st_size
+            except OSError:
+                pass
+    return total
+
+
 def _delete_files(row: sqlite3.Row) -> None:
     for key in ("original_path", "viewing_path", "metadata_path"):
         if row[key]:
@@ -407,27 +421,21 @@ def purge_clips(
     to_delete = list(expired)
     quota = 0
     if max_storage_bytes is not None:
-        total = conn.execute(
-            "SELECT COALESCE(SUM(original_bytes), 0) FROM clip WHERE status != 'failed'"
-        ).fetchone()[0]
-        total -= sum(r["original_bytes"] or 0 for r in expired)
-        if total > max_storage_bytes:
-            expired_ids = {r["id"] for r in expired}
-            for row in conn.execute(
-                "SELECT * FROM clip WHERE protected = 0 ORDER BY created_at"
-            ).fetchall():
-                if total <= max_storage_bytes:
-                    break
-                if row["id"] in expired_ids:
-                    continue
-                to_delete.append(row)
-                total -= row["original_bytes"] or 0
-                quota += 1
-    freed = sum(
-        sum(Path(r[k]).stat().st_size for k in ("original_path", "viewing_path")
-            if r[k] and Path(r[k]).exists())
-        for r in to_delete
-    )  # fmt: skip
+        rows = conn.execute(
+            "SELECT * FROM clip WHERE status != 'failed' ORDER BY created_at"
+        ).fetchall()
+        sizes = {r["id"]: _files_size(r) for r in rows}  # 원본 + 보기용 사본 + JSON
+        expired_ids = {r["id"] for r in expired}
+        total = sum(size for cid, size in sizes.items() if cid not in expired_ids)
+        for row in rows:
+            if total <= max_storage_bytes:
+                break
+            if row["id"] in expired_ids or row["protected"]:
+                continue
+            to_delete.append(row)
+            total -= sizes[row["id"]]
+            quota += 1
+    freed = sum(_files_size(r) for r in to_delete)
     if dry_run:
         return ClipPurgeReport(len(expired), quota, positions, freed)
     for row in to_delete:

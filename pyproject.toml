@@ -31,3 +31,7 @@ target-version = "py311"
 select = ["E", "F", "W", "I", "B", "UP", "RUF", "ISC"]
 # 한글은 화면 폭 2칸으로 계산되어 문자열 줄이 길게 잡히므로, 줄 길이는 formatter에 맡긴다.
 ignore = ["E501"]
+
+[tool.ruff.lint.per-file-ignores]
+# 다른 테스트 모듈의 pytest fixture 를 가져와 인자로 쓰는 패턴
+"tests/test_live_regressions.py" = ["F811"]

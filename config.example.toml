@@ -55,6 +55,8 @@ max_storage_gb = 20.0           # 넘으면 보호하지 않은 오래된 클립
 viewing_copy = "trim_reencode"  # trim_reencode | remux | none
 hard_brake_drop_mps = 7.0       # 3초 안에 약 25km/h 이상 줄고 거의 멈추면 사고 의심 → 주변 클립 보호
 auto_incident = true            # 사고 의심 때 사건·보존 요청 후보까지 자동 생성
+gps_silence_seconds = 30.0      # 카메라 반경 안에서 위치가 이만큼 끊기면 마지막 위치까지 저장
+max_fix_accuracy_m = 150.0      # 이보다 부정확한 위치(기지국 위치 등)로는 카메라를 판단하지 않음
 
 # =============================================================================
 # 2. 계산·보존 기본값 (수동 사건 처리와 공통)

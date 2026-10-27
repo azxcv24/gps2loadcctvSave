@@ -42,6 +42,10 @@ class FetchError(Gps2CctvError):
         self.status = status
 
 
+class SegmentFetchError(FetchError):
+    """세그먼트 하나를 받지 못함(재생목록 주소 자체는 유효할 수 있음)."""
+
+
 class UnsupportedStreamError(Gps2CctvError):
     """이 녹화기로 받을 수 없는 스트림(암호화 HLS, 실시간이 아닌 영상 등)."""
 
@@ -81,6 +85,8 @@ class StreamTiming:
     delay_uncertainty_seconds: float
     pdt_uncertainty_seconds: float
     request_timeout_seconds: float = 10.0
+    # PROGRAM-DATE-TIME 이 이 범위를 벗어나면(미래이거나 너무 과거) 인코더 시계가 틀린 것으로 보고 버린다.
+    max_latency_seconds: float = 120.0
 
 
 class StreamRecorder:
@@ -100,7 +106,13 @@ class StreamRecorder:
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+        self._file_counter = 0
         buffer_dir.mkdir(parents=True, exist_ok=True)
+
+    def _new_path(self, sequence: int, ext: str) -> Path:
+        """재생목록 번호가 초기화돼도 기존 파일을 덮어쓰지 않도록 고유한 파일 이름."""
+        self._file_counter += 1
+        return self.buffer_dir / f"{self._file_counter:08d}_{sequence}.{ext}"
 
     # --- 조회 ---------------------------------------------------------------
     def segments_overlapping(self, start: datetime, end: datetime) -> list[BufferedSegment]:
@@ -157,7 +169,14 @@ class StreamRecorder:
         if self.status in ("starting", "recording"):
             self.status = "stopped"
         if remove_files:
-            shutil.rmtree(self.buffer_dir, ignore_errors=True)
+            self.remove_files()
+
+    def remove_files(self) -> None:
+        shutil.rmtree(self.buffer_dir, ignore_errors=True)
+        try:  # 카메라별 상위 폴더가 비었으면 함께 정리
+            self.buffer_dir.parent.rmdir()
+        except OSError:
+            pass
 
     def _on_stop(self) -> None:
         pass
@@ -190,6 +209,8 @@ class HlsRecorder(StreamRecorder):
         self.poll_interval = 1.0
         self.mapping_used: set[str] = set()
         self._errors = 0
+        self.pdt_rejected = False
+        self.pdt_skew_seconds: float | None = None
 
     def _playlist(self) -> MediaPlaylist:
         url = self.media_url or self.url_provider(False)
@@ -257,14 +278,18 @@ class HlsRecorder(StreamRecorder):
             and previous.mapping == "receive_time"
             and new[0].sequence == previous.sequence + 1
             and not new[0].discontinuity
-            and abs(seconds_between(previous.real_end, anchored[0][0])) <= max(2.0, target)
+            and abs(seconds_between(previous.real_end, anchored[0][0])) <= receive_unc
         )
+        use_pdt = self._pdt_plausible(new, fetched_at, anchored_end)
 
         for index, seg in enumerate(new):
-            data = self.fetch(seg.uri, self.timing.request_timeout_seconds, MAX_SEGMENT_BYTES)
-            path = self.buffer_dir / f"{seg.sequence:010d}.{'m4s' if playlist.is_fmp4 else 'ts'}"
+            try:
+                data = self.fetch(seg.uri, self.timing.request_timeout_seconds, MAX_SEGMENT_BYTES)
+            except FetchError as exc:
+                raise SegmentFetchError(str(exc), exc.status) from exc
+            path = self._new_path(seg.sequence, "m4s" if playlist.is_fmp4 else "ts")
             path.write_bytes(data)
-            if seg.program_date_time is not None:
+            if use_pdt and seg.program_date_time is not None:
                 start = seg.program_date_time
                 end = shift(start, seg.duration)
                 mapping, unc = "program_date_time", self.timing.pdt_uncertainty_seconds
@@ -285,6 +310,24 @@ class HlsRecorder(StreamRecorder):
         self.status = "recording"
         return self.poll_interval
 
+    def _pdt_plausible(self, new: list, fetched_at: datetime, anchored_end: datetime) -> bool:
+        """시각 태그가 받은 시각과 앞뒤가 맞는지 확인한다(인코더 시계 오류·시간대 누락 대비)."""
+        tagged = [s for s in new if s.program_date_time is not None]
+        if not tagged:
+            return False
+        newest_end = shift(tagged[-1].program_date_time, tagged[-1].duration)
+        latency = seconds_between(newest_end, fetched_at)
+        if -2.0 <= latency <= self.timing.max_latency_seconds:
+            return True
+        skew = seconds_between(anchored_end, newest_end)
+        if not self.pdt_rejected:
+            log.warning(
+                "%s: 스트림 시각 태그가 실제 시각과 %.0f초 어긋나 수신 시각으로 추정합니다.",
+                self.camera_id, skew,
+            )  # fmt: skip
+        self.pdt_rejected, self.pdt_skew_seconds = True, skew
+        return False
+
     def step(self) -> float:
         """폴링 한 번(오류 처리 포함). 다음 폴링까지 기다릴 초를 돌려준다."""
         try:
@@ -298,7 +341,11 @@ class HlsRecorder(StreamRecorder):
         except (FetchError, PlaylistError) as exc:
             self._errors += 1
             self.error = str(exc)
-            if isinstance(exc, FetchError) and exc.status in (401, 403, 404, 410):
+            if (
+                isinstance(exc, FetchError)
+                and not isinstance(exc, SegmentFetchError)
+                and exc.status in (401, 403, 404, 410)
+            ):
                 # 시간 제한 토큰이 만료됐을 수 있으므로 주소를 새로 받는다.
                 self.media_url = None
                 try:
@@ -323,7 +370,12 @@ class HlsRecorder(StreamRecorder):
 
 
 class FfmpegRecorder(StreamRecorder):
-    """HLS가 아닌 스트림(RTSP, 암호화 HLS 등)을 ffmpeg로 짧은 세그먼트로 받는다."""
+    """HLS가 아닌 스트림(RTSP, 암호화 HLS 등)을 ffmpeg로 짧은 세그먼트로 받는다.
+
+    세그먼트 길이는 키프레임 위치에 따라 달라지므로, ffmpeg가 세그먼트를 닫을 때마다 남기는
+    목록(CSV: 파일, 스트림 시작 시각, 끝 시각)으로 길이를 정확히 알고, 실제 시각은
+    "목록에 나타난 시각 - 스트림 시각"의 최솟값(가장 덜 늦게 받은 세그먼트)을 기준으로 맞춘다.
+    """
 
     def __init__(
         self,
@@ -348,7 +400,13 @@ class FfmpegRecorder(StreamRecorder):
         self.timing = timing
         self.segment_seconds = segment_seconds
         self.process: subprocess.Popen | None = None
-        self._seen: dict[str, datetime] = {}
+        self.list_path = buffer_dir / "segments.csv"
+        self.log_path = buffer_dir / "ffmpeg.log"
+        self._rows_seen = 0
+        self._epoch = 0
+        self._bases: dict[int, datetime] = {}
+        # (epoch, sequence, path, stream_start, stream_end, size)
+        self._raw: list[tuple[int, int, Path, float, float, int]] = []
 
     def _command(self) -> list[str]:
         input_args = self.input_args
@@ -364,6 +422,7 @@ class FfmpegRecorder(StreamRecorder):
             self.ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *input_args,
             "-map", "0:v:0", *self.codec_args, "-f", "segment",
             "-segment_time", str(self.segment_seconds), "-segment_format", "mpegts",
+            "-segment_list", str(self.list_path), "-segment_list_type", "csv",
             str(self.buffer_dir / "seg_%08d.ts"),
         ]  # fmt: skip
 
@@ -373,59 +432,62 @@ class FfmpegRecorder(StreamRecorder):
 
     def _scan(self) -> None:
         now = self.clock()
-        files = sorted(self.buffer_dir.glob("seg_*.ts"))
-        if not files:
+        try:
+            lines = self.list_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        except FileNotFoundError:
             return
-        for path in files:
-            self._seen.setdefault(path.name, now)
-        known = {s.path.name for s in self.segments}
-        finished = self.process is not None and self.process.poll() is not None
-        # 다음 세그먼트 파일이 생겼으면 앞 세그먼트는 닫힌 것이다.
-        completed: list[tuple[Path, datetime]] = []
-        for current, nxt in zip(files, [*files[1:], None], strict=True):
-            if current.name in known:
-                continue
-            if nxt is None and not finished:
-                break
-            completed.append((current, self._seen[nxt.name] if nxt is not None else now))
-        if not completed:
+        complete = [line for line in lines if line.count(",") >= 2]
+        new_rows = complete[self._rows_seen :]
+        if not new_rows:
             return
-        # 끝 시각 = 닫힌 시각 - 스트림 지연. 접속 직후처럼 여러 세그먼트가 한꺼번에 닫히면(밀린 구간)
-        # 가장 새 것을 기준으로 길이만큼 거꾸로 배치해 시간이 겹치지 않게 한다.
         lag = self.timing.delay_seconds + 0.25
-        ends: list[datetime] = [now] * len(completed)
-        starts: list[datetime] = [now] * len(completed)
-        for i in reversed(range(len(completed))):
-            end = shift(completed[i][1], -lag)
-            if i + 1 < len(completed) and end > starts[i + 1]:
-                end = starts[i + 1]
-            ends[i], starts[i] = end, shift(end, -self.segment_seconds)
         with self._lock:
-            previous = self.segments[-1] if self.segments else None
-        prev_end = previous.real_end if previous is not None else None
-        for i, (path, _closed) in enumerate(completed):
-            if (
-                prev_end is not None
-                and abs(seconds_between(prev_end, starts[i])) < self.segment_seconds
-            ):
-                starts[i] = min(prev_end, ends[i])
-            sequence = int(path.stem.split("_")[1])
-            self._add(
+            for line in new_rows:
+                name, start_text, end_text = line.rsplit(",", 2)
+                try:
+                    start, end = float(start_text), float(end_text)
+                except ValueError:
+                    continue
+                path = self.buffer_dir / name
+                if self._raw and start < self._raw[-1][3] - 1.0:  # 스트림 시각이 되돌아감
+                    self._epoch += 1
+                candidate = shift(now, -(lag + end))
+                base = self._bases.get(self._epoch)
+                if base is None or candidate < base:
+                    self._bases[self._epoch] = candidate
+                try:
+                    size = path.stat().st_size
+                except FileNotFoundError:
+                    continue
+                sequence = int(path.stem.split("_")[1]) if "_" in path.stem else len(self._raw)
+                self._raw.append((self._epoch, sequence, path, start, end, size))
+            self._rows_seen = len(complete)
+            self._rebuild()
+        self.status = "recording"
+
+    def _rebuild(self) -> None:
+        unc = self.timing.delay_uncertainty_seconds + 0.5
+        kept = []
+        segments = []
+        for epoch, sequence, path, start, end, size in self._raw:
+            if not path.exists():
+                continue  # prune 로 지워짐
+            kept.append((epoch, sequence, path, start, end, size))
+            base = self._bases[epoch]
+            segments.append(
                 BufferedSegment(
-                    sequence, path, seconds_between(starts[i], ends[i]), starts[i], ends[i],
-                    "ffmpeg_segment", self.timing.delay_uncertainty_seconds + 0.5,
-                    path.stat().st_size,
+                    sequence, path, end - start, shift(base, start), shift(base, end),
+                    "ffmpeg_segment", unc, size,
                 )
             )  # fmt: skip
-            prev_end = ends[i]
-        self.status = "recording"
+        self._raw = kept
+        self.segments = sorted(segments, key=lambda s: (s.real_start, s.sequence))
 
     def _run(self) -> None:
         try:
             command = self._command()
-            self.process = subprocess.Popen(
-                command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
-            )
+            with self.log_path.open("wb") as log_file:
+                self.process = subprocess.Popen(command, stdout=subprocess.DEVNULL, stderr=log_file)
         except UnsupportedStreamError as exc:
             self.status, self.error = "error", str(exc)
             return
@@ -433,18 +495,24 @@ class FfmpegRecorder(StreamRecorder):
             self.status, self.error = "error", f"ffmpeg 실행 실패: {exc}"
             return
         while not self._stop.is_set():
-            self._scan()
+            try:
+                self._scan()
+            except Exception:
+                log.exception("%s: 세그먼트 확인 중 오류", self.camera_id)
             if self.process.poll() is not None:
                 self._scan()
-                self.status = "error" if self.process.returncode else "stopped"
-                err = (
-                    self.process.stderr.read().decode(errors="replace")
-                    if self.process.stderr
-                    else ""
-                )
-                self.error = err.strip().splitlines()[-1][:200] if err.strip() else None
+                # 실시간 스트림이 스스로 끝났다면 더는 받을 수 없으므로 오류로 본다.
+                self.status = "error"
+                self.error = self._last_log_line() or f"ffmpeg 종료({self.process.returncode})"
                 return
             self._stop.wait(0.25)
+
+    def _last_log_line(self) -> str | None:
+        try:
+            text = self.log_path.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            return None
+        return text.splitlines()[-1][:200] if text else None
 
     def _on_stop(self) -> None:
         if self.process is not None and self.process.poll() is None:
@@ -453,7 +521,11 @@ class FfmpegRecorder(StreamRecorder):
                 self.process.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 self.process.kill()
-        self._scan()
+                self.process.wait(timeout=5)
+        try:
+            self._scan()
+        except Exception:
+            log.exception("%s: 마지막 세그먼트 확인 중 오류", self.camera_id)
 
 
 def wait_until(predicate: Callable[[], bool], timeout: float, interval: float = 0.1) -> bool:

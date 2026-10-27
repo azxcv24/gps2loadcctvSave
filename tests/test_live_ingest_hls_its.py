@@ -199,7 +199,8 @@ class TestRecorderTiming:
         assert second.real_end == datetime(2026, 10, 27, 5, 0, 4, tzinfo=UTC)
         # PDT가 끊긴 세그먼트는 수신 시각으로 추정
         assert third.mapping == "receive_time"
-        assert (tmp_path / "0000000100.ts").read_bytes() == b"SEG:https://x/seg100.ts"
+        assert first.path.read_bytes() == b"SEG:https://x/seg100.ts"
+        assert first.path.name.endswith("_100.ts")
 
     def test_receive_time_mapping_chains_segments(self, tmp_path):
         clock = {"now": datetime(2026, 10, 27, 5, 0, 10, tzinfo=UTC)}
@@ -226,7 +227,8 @@ class TestRecorderTiming:
         files = {"https://x/index.m3u8": MEDIA.encode()}
         rec = HlsRecorder(
             "c", lambda force: "https://x/index.m3u8", tmp_path, StreamTiming(3, 4, 1),
-            fetch=lambda url, t, m: files.get(url, b"seg"), clock=lambda: NOW,
+            fetch=lambda url, t, m: files.get(url, b"seg"),
+            clock=lambda: NOW + timedelta(seconds=10),
         )  # fmt: skip
         rec.poll_once()
         base = datetime(2026, 10, 27, 5, 0, 0, tzinfo=UTC)

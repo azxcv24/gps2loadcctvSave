@@ -77,6 +77,20 @@ class Watch:
     fallback_tried: bool = False
 
 
+@dataclass
+class OpenPassage:
+    """아직 촬영 반경 안에 있는 통과(트랙이 잘려도 처음 진입 시각을 기억)."""
+
+    entry: datetime
+    last_t: datetime
+    estimated_passage_at: datetime
+    closest_distance_m: float | None
+    flags: set[str]
+    camera: CameraRef
+    recorder: StreamRecorder
+    capped: bool = False
+
+
 def camera_ref(row: Any) -> CameraRef:
     return CameraRef(
         id=row["id"],
@@ -123,6 +137,9 @@ class LiveEngine:
         self.extracting: dict[str, ClipPlan] = {}
         self.done: dict[tuple[str, str], list[tuple[datetime, datetime]]] = {}
         self.capped: dict[tuple[str, str], datetime] = {}
+        self.open: dict[tuple[str, str], OpenPassage] = {}
+        self.last_seen: dict[str, datetime] = {}
+        self.retired: list[StreamRecorder] = []
         self.retry_after: dict[str, datetime] = {}
         self.policy_cache: dict[str, tuple[datetime, bool]] = {}
         self.last_event: dict[str, datetime] = {}
@@ -141,6 +158,9 @@ class LiveEngine:
         with self.lock:
             now = self.clock()
             self._store_position(fix)
+            self.last_seen[fix.device_id] = now
+            if fix.accuracy_m is not None and fix.accuracy_m > self.rec.max_fix_accuracy_m:
+                return  # 기지국 위치 등 부정확한 위치로 카메라를 판단하지 않는다(저장만 함)
             track = self._add_to_track(fix)
             if fix.heading_deg is not None:
                 self.headings[fix.device_id] = fix.heading_deg
@@ -208,10 +228,15 @@ class LiveEngine:
         window = [p for p in track if seconds_between(p.t, last.t) <= self.rec.stationary_seconds]
         if seconds_between(window[0].t, last.t) < self.rec.stationary_seconds * 0.8:
             return False
-        return all(
-            haversine_m(p.lat, p.lon, last.lat, last.lon) <= self.rec.stationary_radius_m
+        speeds = [p.speed_mps for p in window if p.speed_mps is not None]
+        if len(speeds) >= 0.8 * len(window) and max(speeds) <= 1.0:
+            return True  # 위치가 흔들려도 속도가 0 근처면 정차
+        accuracies = sorted(
+            p.accuracy_m if p.accuracy_m is not None else self.settings.default_gps_accuracy_m
             for p in window
         )
+        radius = max(self.rec.stationary_radius_m, 2 * accuracies[len(accuracies) // 2])
+        return all(haversine_m(p.lat, p.lon, last.lat, last.lon) <= radius for p in window)
 
     # ------------------------------------------------------------------ 녹화 대기
     def _capture_allowed(self, source_id: str, now: datetime) -> bool:
@@ -255,7 +280,9 @@ class LiveEngine:
             effective = coverage + accuracy + cam.location_uncertainty_m
             if distance <= effective + 30:
                 eta = 0.0
-                if stationary and (fix.device_id, cam.id) in self.capped:
+                key = (fix.device_id, cam.id)
+                op = self.open.get(key)
+                if stationary and (key in self.capped or (op is not None and op.capped)):
                     continue  # 카메라 앞에 오래 서 있어 이미 최대 길이로 저장함
             elif stationary or distance > reach + effective:
                 continue
@@ -272,9 +299,35 @@ class LiveEngine:
             self._ensure_watch(cam, fix.device_id, now)
 
     def _has_plans(self, camera_id: str) -> bool:
+        """이 카메라의 녹화를 계속해야 하는가(예약된 클립, 아직 반경 안이고 최대 길이 전인 통과)."""
         return any(p.camera.id == camera_id for p in self.plans) or any(
-            p.camera.id == camera_id for p in self.extracting.values()
+            op.camera.id == camera_id and not op.capped for op in self.open.values()
         )
+
+    def _referenced(self, recorder: StreamRecorder) -> bool:
+        return (
+            any(p.recorder is recorder for p in self.plans)
+            or any(p.recorder is recorder for p in self.extracting.values())
+            or any(op.recorder is recorder and not op.capped for op in self.open.values())
+        )
+
+    def _release(self, recorder: StreamRecorder) -> None:
+        """녹화를 멈춘다. 아직 클립에 쓰일 버퍼 파일은 클립 저장이 끝날 때까지 남긴다."""
+        keep = self._referenced(recorder)
+        if keep:
+            self.retired.append(recorder)
+        if self.run_threads:
+            threading.Thread(
+                target=recorder.stop, kwargs={"remove_files": not keep}, daemon=True
+            ).start()
+        else:
+            recorder.stop(remove_files=not keep)
+
+    def _cleanup_retired(self) -> None:
+        for recorder in list(self.retired):
+            if not self._referenced(recorder) and not recorder.alive:
+                self.retired.remove(recorder)
+                recorder.remove_files()
 
     def _ensure_watch(self, cam: CameraRef, device_id: str, now: datetime) -> None:
         until = shift(now, self.rec.arm_lookahead_seconds + 30)
@@ -303,11 +356,7 @@ class LiveEngine:
 
     def _stop_watch(self, watch: Watch) -> None:
         self.watches.pop(watch.camera.id, None)
-        recorder = watch.recorder
-        if self.run_threads:
-            threading.Thread(target=recorder.stop, daemon=True).start()
-        else:
-            recorder.stop()
+        self._release(watch.recorder)
         log.info("녹화 대기 종료: %s", watch.camera.name or watch.camera.id)
 
     # ------------------------------------------------------------------ 통과 감지
@@ -320,53 +369,127 @@ class LiveEngine:
             if device_id not in watch.devices:
                 continue
             cam = watch.camera
+            key = (device_id, cam.id)
             info = CameraInfo(
                 cam.id, cam.source_id, cam.provider_camera_id, cam.latitude, cam.longitude,
                 cam.location_uncertainty_m, cam.coverage_radius_m,
             )  # fmt: skip
+            still_inside = False
             for passage in compute_passages(track, info, self.settings, None):
-                entry, exit_at, capped = passage.entry_at, passage.exit_at, False
+                flags = set(passage.flags) - {"route_starts_in_range", "route_ends_in_range"}
+                op = self.open.get(key)
                 if "route_ends_in_range" in passage.flags:
-                    if seconds_between(entry, last_t) < self.rec.max_clip_seconds:
+                    still_inside = True
+                    if op is None:
+                        op = OpenPassage(
+                            passage.entry_at, last_t, passage.estimated_passage_at,
+                            passage.closest_distance_m, flags, cam, watch.recorder,
+                        )  # fmt: skip
+                        self.open[key] = op
+                    else:
+                        op.entry = min(op.entry, passage.entry_at)
+                        op.last_t, op.recorder = last_t, watch.recorder
+                        op.flags |= flags
+                        if passage.closest_distance_m is not None and (
+                            op.closest_distance_m is None
+                            or passage.closest_distance_m < op.closest_distance_m
+                        ):
+                            op.closest_distance_m = passage.closest_distance_m
+                            op.estimated_passage_at = passage.estimated_passage_at
+                    if not op.capped:  # 최대 길이를 채운 뒤에는 정차 중 녹화를 이어가지 않음
                         watch.armed_until = max(
                             watch.armed_until, shift(now, self.rec.arm_lookahead_seconds)
                         )
-                        continue  # 아직 촬영 반경 안
-                    exit_at, capped = shift(entry, self.rec.max_clip_seconds), True
-                if exit_at < shift(watch.started_at, -self.rec.buffer_seconds):
+                    if (
+                        not op.capped
+                        and seconds_between(op.entry, last_t) >= self.rec.max_clip_seconds
+                    ):
+                        # 카메라 앞에 오래 머무름: 처음 max_clip 초를 저장하고 나머지는 떠날 때 저장
+                        self._schedule(
+                            device_id, cam, watch.recorder, op.entry,
+                            shift(op.entry, self.rec.max_clip_seconds), op.estimated_passage_at,
+                            op.closest_distance_m, op.flags, capped=True, now=now,
+                        )  # fmt: skip
+                        op.capped = True
                     continue
-                self._schedule(device_id, cam, passage, entry, exit_at, capped, now)
+                entry = passage.entry_at
+                if op is not None and passage.entry_at <= op.last_t and passage.exit_at >= op.entry:
+                    entry = min(op.entry, entry)  # 반경 안에 있던 통과가 이제 끝남
+                    flags |= op.flags
+                    self.open.pop(key, None)
+                if passage.exit_at < shift(watch.started_at, -self.rec.buffer_seconds):
+                    continue
+                self._schedule_remainder(
+                    device_id, cam, watch.recorder, entry, passage.exit_at,
+                    passage.estimated_passage_at, passage.closest_distance_m, flags, now,
+                )  # fmt: skip
+            op = self.open.get(key)
+            if op is not None and not still_inside:
+                # 늦게 온 위치로 경로가 바뀌어 반경 안 통과가 사라짐: 마지막으로 안에 있던 시각까지 저장
+                self.open.pop(key, None)
+                self._close_open(device_id, op, now)
 
-    def _schedule(self, device_id, cam, passage, entry, exit_at, capped, now) -> None:
+    def _close_open(self, device_id: str, op: OpenPassage, now: datetime, extra=()) -> None:
+        if op.capped and not op.recorder.alive:
+            return  # 앞부분은 이미 저장했고, 정차 중에는 녹화를 멈췄으므로 더 저장할 장면이 없음
+        self._schedule_remainder(
+            device_id, op.camera, op.recorder, op.entry, op.last_t, op.estimated_passage_at,
+            op.closest_distance_m, op.flags | set(extra), now,
+        )  # fmt: skip
+
+    def _schedule_remainder(
+        self, device_id, cam, recorder, entry, exit_at, estimated, closest, flags, now
+    ) -> None:
+        """이미 저장(예약)한 구간을 빼고 남은 부분만 예약한다. 남은 부분이 길면 떠나는 장면만."""
         key = (device_id, cam.id)
         start = shift(entry, -self.rec.pre_seconds)
         end = shift(exit_at, self.rec.post_seconds)
         for plan in self.plans:
             if (
                 (plan.device_id, plan.camera.id) == key
+                and not plan.capped
                 and plan.window_end >= start
-                and (plan.window_start <= end)
+                and plan.window_start <= end
             ):
-                if not plan.capped and end > plan.window_end:  # 늦게 들어온 위치로 구간이 늘어남
+                if end > plan.window_end:  # 늦게 들어온 위치로 구간이 늘어남
                     plan.window_end, plan.exit_at = end, exit_at
                     plan.due_at = shift(end, self._settle_seconds(cam))
                 return
-        if any(a <= end and b >= start for a, b in self.done.get(key, [])):
-            return
-        delay = self._settle_seconds(cam)
+        covered = [b for a, b in self.done.get(key, []) if a <= end and b >= start]
+        if covered:
+            covered_end = max(covered)
+            if covered_end >= shift(end, -0.5):
+                return
+            entry = max(entry, shift(covered_end, -self.rec.post_seconds))
+            flags = set(flags) | {"continuation"}
+        if seconds_between(entry, exit_at) > self.rec.max_clip_seconds:
+            entry = shift(exit_at, -self.rec.max_clip_seconds)  # 떠나는 장면
+            flags = set(flags) | {"departure"}
+        self._schedule(
+            device_id, cam, recorder, entry, exit_at, estimated, closest, flags,
+            capped=False, now=now,
+        )  # fmt: skip
+
+    def _schedule(
+        self, device_id, cam, recorder, entry, exit_at, estimated, closest, flags, *, capped, now
+    ) -> None:
+        key = (device_id, cam.id)
+        start = shift(entry, -self.rec.pre_seconds)
+        end = shift(exit_at, self.rec.post_seconds)
         plan = ClipPlan(
             id=new_clip_id(),
             device_id=device_id,
             camera=cam,
             entry_at=entry,
             exit_at=exit_at,
-            estimated_passage_at=passage.estimated_passage_at,
-            closest_distance_m=passage.closest_distance_m,
+            estimated_passage_at=min(max(estimated, entry), exit_at),
+            closest_distance_m=closest,
             window_start=start,
             window_end=end,
-            due_at=shift(end, delay),
-            flags=set(passage.flags) - {"route_starts_in_range", "route_ends_in_range"},
+            due_at=shift(end, self._settle_seconds(cam)),
+            flags=set(flags),
             capped=capped,
+            recorder=recorder,
         )
         self.plans.append(plan)
         self.done.setdefault(key, []).append((start, end))
@@ -496,17 +619,27 @@ class LiveEngine:
     def tick(self, now: datetime | None = None) -> None:
         with self.lock:
             now = now or self.clock()
+            self._close_silent(now)
             self._extract_due(now)
             self._check_recorders(now)
             for watch in list(self.watches.values()):
                 if watch.armed_until < now and not self._has_plans(watch.camera.id):
                     self._stop_watch(watch)
             self._prune_buffers(now)
+            self._cleanup_retired()
             self._prune_memory(now)
         self._process_events(now)
         if self._last_purge is None or now - self._last_purge > timedelta(hours=1):
             self._last_purge = now
             self.purge(now)
+
+    def _close_silent(self, now: datetime) -> None:
+        """반경 안에서 위치가 끊긴 기기(앱 종료·통신 두절)는 마지막 위치까지의 구간을 저장한다."""
+        for key, op in list(self.open.items()):
+            seen = self.last_seen.get(key[0])
+            if seen is not None and seconds_between(seen, now) > self.rec.gps_silence_seconds:
+                self.open.pop(key, None)
+                self._close_open(key[0], op, now, extra=("gps_lost",))
 
     def purge(self, now: datetime) -> None:
         with self.store as conn:
@@ -517,8 +650,7 @@ class LiveEngine:
 
     def _extract_due(self, now: datetime, *, force: bool = False) -> None:
         for plan in [p for p in self.plans if force or p.due_at <= now]:
-            watch = self.watches.get(plan.camera.id)
-            recorder = watch.recorder if watch else None
+            recorder = plan.recorder
             if recorder is not None and recorder.alive and not force:
                 latest = recorder.latest_end()
                 needed = shift(plan.window_end, self.max_uncertainty)
@@ -572,10 +704,12 @@ class LiveEngine:
                     watch.recorder = fallback
                     if self.run_threads:
                         fallback.start()
-                    old.stop()
+                    self._release(old)  # 이전 버퍼는 예약된 클립에 쓰이면 남겨 둠
                     log.info("ffmpeg 녹화기로 전환: %s", watch.camera.name or watch.camera.id)
                     continue
-            if status in ("error", "unsupported") and not self._has_plans(watch.camera.id):
+            if status in ("error", "unsupported", "stopped") and not any(
+                p.camera.id == watch.camera.id for p in self.plans
+            ):
                 self.retry_after[watch.camera.id] = shift(now, 120)
                 self._stop_watch(watch)
 
@@ -587,7 +721,11 @@ class LiveEngine:
             pinned = [
                 (shift(p.window_start, -margin), shift(p.window_end, margin))
                 for p in active
-                if p.camera.id == watch.camera.id
+                if p.recorder is watch.recorder
+            ] + [
+                (shift(op.entry, -self.rec.pre_seconds - margin), shift(now, margin))
+                for op in self.open.values()
+                if op.recorder is watch.recorder and not op.capped
             ]
             watch.recorder.prune(keep_after, pinned)
 
@@ -598,8 +736,18 @@ class LiveEngine:
             if not self.done[key]:
                 del self.done[key]
         for key, when in list(self.capped.items()):
-            if when < horizon:
+            if when < horizon and key not in self.open:
                 del self.capped[key]
+        for camera_id, until in list(self.retry_after.items()):
+            if until < now:
+                del self.retry_after[camera_id]
+        live = {id(w.recorder) for w in self.watches.values()}
+        for key in list(self._next_poll):
+            if key not in live:
+                del self._next_poll[key]
+        for device_id, when in list(self.last_event.items()):
+            if when < horizon:
+                del self.last_event[device_id]
 
     def step_recorders(self) -> None:
         """스레드 없이 녹화기를 한 번씩 돌린다(시뮬레이션 테스트·동기 실행용)."""
@@ -629,6 +777,9 @@ class LiveEngine:
         """대기 중인 클립을 지금까지 받은 범위로 저장하고 녹화를 멈춘다."""
         with self.lock:
             now = now or self.clock()
+            for key, op in list(self.open.items()):
+                self.open.pop(key, None)
+                self._close_open(key[0], op, now)
             self._extract_due(now, force=True)
         if self.executor is not None:
             self.executor.shutdown(wait=True)
@@ -636,6 +787,9 @@ class LiveEngine:
             for watch in list(self.watches.values()):
                 self.watches.pop(watch.camera.id, None)
                 watch.recorder.stop()
+            for recorder in self.retired:
+                recorder.stop()
+            self.retired.clear()
 
 
 def is_latest(track: list[TrackPoint], fix: Fix) -> bool:

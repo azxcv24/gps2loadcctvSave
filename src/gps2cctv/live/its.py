@@ -219,9 +219,22 @@ class ItsCatalog:
                     self._last_request = time.monotonic()
             records += its_records(parse_its_response(body), self.cfg, now, road_type)
         stamp = to_db(now)
+        size = self.cfg.tile_degrees
         with self.store as conn, conn:
             for rec in records:
                 upsert_camera(conn, self.source_id, rec, stamp)
+            # 이번 응답에 없는 이 타일의 카메라는 목록에서 빠진 것으로 표시(녹화 대상에서 제외)
+            conn.execute(
+                """
+                UPDATE camera SET status = 'missing_from_catalog'
+                WHERE source_id = ? AND synced_at < ? AND status != 'missing_from_catalog'
+                  AND latitude >= ? AND latitude < ? AND longitude >= ? AND longitude < ?
+                """,
+                (
+                    self.source_id, stamp, tile[0] * size, (tile[0] + 1) * size,
+                    tile[1] * size, (tile[1] + 1) * size,
+                ),
+            )  # fmt: skip
         with self._lock:
             self.fresh[tile] = now
         log.info("ITS 타일 %s 갱신: 카메라 %d대", tile, len(records))
@@ -239,7 +252,10 @@ class ItsCatalog:
             return None
         fetched = from_db(row["stream_url_fetched_at"]) if row["stream_url_fetched_at"] else None
         max_age = timedelta(minutes=self.cfg.stream_url_max_age_minutes)
-        if force or fetched is None or self.clock() - fetched > max_age:
+        now = self.clock()
+        if force and fetched is not None and now - fetched < timedelta(seconds=60):
+            force = False  # 방금 받은 주소로도 실패하면 API를 반복 호출하지 않는다
+        if force or fetched is None or now - fetched > max_age:
             try:
                 self.refresh_tile(self.tile_of(row["latitude"], row["longitude"]))
             except (FetchError, ItsError) as exc:

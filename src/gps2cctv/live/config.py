@@ -99,6 +99,10 @@ class RecordingConfig:
     # 사고 의심 이벤트 때 사건을 자동으로 만들고 보존 요청 후보까지 계산
     auto_incident: bool = True
     track_window_seconds: float = 900.0
+    # 촬영 반경 안에서 위치가 이만큼 끊기면 마지막 위치까지의 구간을 저장
+    gps_silence_seconds: float = 30.0
+    # 이보다 부정확한 위치(기지국 위치 등)로는 카메라를 판단하지 않음
+    max_fix_accuracy_m: float = 150.0
     stationary_radius_m: float = 30.0
     stationary_seconds: float = 120.0
 
