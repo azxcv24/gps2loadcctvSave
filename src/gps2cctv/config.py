@@ -10,9 +10,13 @@ import tomllib
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 from .errors import Gps2CctvError
 from .timeutil import get_zone
+
+# 실시간 자동 녹화(serve) 전용 섹션 — gps2cctv.live.config 가 읽는다
+LIVE_SECTIONS = frozenset({"server", "devices", "its", "camera_files", "recording"})
 
 
 class ConfigError(Gps2CctvError):
@@ -145,6 +149,8 @@ def load_settings(path: Path | None) -> Settings:
 
     flat: dict[str, Any] = {}
     for key, value in data.items():
+        if key in LIVE_SECTIONS:
+            continue  # 실시간 자동 녹화 설정은 live.config 에서 읽는다
         items = value.items() if isinstance(value, dict) else [(key, value)]
         for sub_key, sub_value in items:
             if sub_key in flat:
@@ -156,4 +162,12 @@ def load_settings(path: Path | None) -> Settings:
     if unknown:
         raise ConfigError(f"알 수 없는 설정 키: {', '.join(unknown)}")
     coerced = {name: _coerce(name, defaults[name], value) for name, value in flat.items()}
+    its = data.get("its")
+    if isinstance(its, dict):
+        # [its] 를 설정했다는 것은 소유자가 그 API 주소를 승인했다는 뜻이므로 허용 호스트에 더한다.
+        endpoint = its.get("endpoint", "https://openapi.its.go.kr:9443/cctvInfo")
+        host = urlparse(str(endpoint)).hostname
+        if host:
+            hosts = set(coerced.get("allowed_hosts", base.allowed_hosts)) | {host.lower()}
+            coerced["allowed_hosts"] = tuple(sorted(hosts))
     return replace(base, **coerced).validate()

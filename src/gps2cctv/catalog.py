@@ -33,6 +33,9 @@ from .policy import (
 )
 from .timeutil import TimeInputError, from_db, parse_timestamp, to_db
 
+ENVIRONMENTS = ("synthetic", "production", "owned")
+# json_file: 로컬 JSON 카탈로그 / its: 국가교통정보센터 CCTV API(실시간 자동 녹화에서 주변만 갱신)
+ADAPTER_TYPES = ("json_file", "its")
 SOURCE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9\-]{1,63}$")
 PROVIDER_CAMERA_ID_RE = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
 CAMERA_STATUSES = frozenset({"active", "inactive", "unknown"})
@@ -117,8 +120,9 @@ def parse_source_spec(data: Any, base_dir: Path, settings: Settings) -> SourceSp
     if not SOURCE_ID_RE.match(source_id):
         raise CatalogError(f"{where}: id는 영문 소문자·숫자·하이픈 2~64자여야 합니다.")
     environment = _text(data, "environment", where, max_len=20)
-    if environment not in ("synthetic", "production"):
-        raise CatalogError(f"{where}: environment는 synthetic 또는 production 이어야 합니다.")
+    if environment not in ENVIRONMENTS:
+        raise CatalogError(f"{where}: environment는 {', '.join(ENVIRONMENTS)} 중 하나여야 합니다.")
+    owned = environment == "owned"
     capabilities = data.get("capabilities")
     if (
         not isinstance(capabilities, list)
@@ -128,20 +132,30 @@ def parse_source_spec(data: Any, base_dir: Path, settings: Settings) -> SourceSp
         raise CatalogError(
             f"{where}: capabilities는 {sorted(CAPABILITIES)} 중 하나 이상의 목록이어야 합니다."
         )
-    endpoint = _text(data, "official_endpoint", where, max_len=500)
-    problem = endpoint_problem(environment, endpoint, settings)
-    if problem:
-        raise CatalogError(f"{where}: 등록 거부 — {REASON_TEXT[problem]} ({endpoint})")
-    terms_url = _text(data, "terms_url", where, max_len=500)
-    if terms_problem(terms_url):
-        raise CatalogError(f"{where}: 등록 거부 — {REASON_TEXT['terms_url_invalid']}")
-    procedure = _text(data, "preservation_procedure", where, max_len=2000)
+    # 본인 소유 장비(owned)는 외부 제공처가 아니므로 공식 엔드포인트·약관이 없어도 된다.
+    endpoint = _text(data, "official_endpoint", where, max_len=500, required=not owned) or ""
+    terms_url = _text(data, "terms_url", where, max_len=500, required=not owned) or ""
+    if not owned:
+        problem = endpoint_problem(environment, endpoint, settings)
+        if problem:
+            raise CatalogError(f"{where}: 등록 거부 — {REASON_TEXT[problem]} ({endpoint})")
+        if terms_problem(terms_url):
+            raise CatalogError(f"{where}: 등록 거부 — {REASON_TEXT['terms_url_invalid']}")
+    procedure = (
+        _text(data, "preservation_procedure", where, max_len=2000, required=not owned)
+        or "본인 소유 장비 — 직접 보관"
+    )
     retention = _number(data, "provider_retention_days", where, minimum=1, maximum=3650)
     adapter = data.get("adapter")
-    if not isinstance(adapter, dict) or adapter.get("type") != "json_file":
-        raise CatalogError(f"{where}: adapter.type 은 현재 'json_file' 만 지원합니다.")
-    adapter_path = _text(adapter, "path", f"{where} adapter", max_len=1000)
-    resolved = (base_dir / adapter_path).resolve()
+    if not isinstance(adapter, dict) or adapter.get("type") not in ADAPTER_TYPES:
+        raise CatalogError(
+            f"{where}: adapter.type 은 {', '.join(ADAPTER_TYPES)} 중 하나여야 합니다."
+        )
+    if adapter["type"] == "json_file":
+        adapter_path = _text(adapter, "path", f"{where} adapter", max_len=1000)
+        adapter_config = {"type": "json_file", "path": str((base_dir / adapter_path).resolve())}
+    else:
+        adapter_config = {"type": adapter["type"]}
     return SourceSpec(
         id=source_id,
         provider_name=_text(data, "provider_name", where, max_len=200),
@@ -151,7 +165,7 @@ def parse_source_spec(data: Any, base_dir: Path, settings: Settings) -> SourceSp
         terms_url=terms_url,
         preservation_procedure=procedure,
         provider_retention_days=int(retention) if retention is not None else None,
-        adapter={"type": "json_file", "path": str(resolved)},
+        adapter=adapter_config,
     )
 
 
@@ -164,9 +178,16 @@ def register_sources(
     if not isinstance(items, list) or not items:
         raise CatalogError(f"{path.name}: 'sources' 목록이 필요합니다.")
     specs = [parse_source_spec(item, path.parent, settings) for item in items]
+    return register_specs(conn, specs, now, settings)
+
+
+def register_specs(
+    conn: sqlite3.Connection, specs: list[SourceSpec], now: datetime, settings: Settings
+) -> list[str]:
+    """검증을 마친 소스 정의를 등록(또는 갱신)한다."""
     ids = [spec.id for spec in specs]
     if len(set(ids)) != len(ids):
-        raise CatalogError(f"{path.name}: 소스 id가 중복되었습니다.")
+        raise CatalogError("소스 id가 중복되었습니다.")
 
     stamp = to_db(now)
     with conn:
@@ -263,8 +284,6 @@ def review_source(
     get_source(conn, source_id)
     if not actions:
         raise CatalogError("허용할 행위를 하나 이상 지정하세요.")
-    if "media_capture" in actions:
-        raise CatalogError("영상 수집(media_capture)은 현재 버전에서 허용할 수 없습니다.")
     unknown = sorted(set(actions) - REVIEWABLE_ACTIONS)
     if unknown:
         raise CatalogError(
@@ -320,7 +339,7 @@ def set_source_enabled(
 ) -> None:
     """소스 활성/비활성. 비활성화는 비상 중단·철회에 사용하며 즉시 모든 행위가 거부된다."""
     source = get_source(conn, source_id)
-    if enabled:
+    if enabled and source["environment"] != "owned":
         problem = endpoint_problem(source["environment"], source["official_endpoint"], settings)
         if problem:
             raise PolicyDeniedError(f"활성화 거부 — {REASON_TEXT[problem]}", problem)
@@ -402,6 +421,24 @@ class CameraRecord:
     status: str
     observed_at: datetime
     clock: ClockDeclaration | None
+    stream_url: str | None = None
+    stream_delay_seconds: float | None = None
+
+
+STREAM_SCHEMES = ("http", "https", "rtsp", "rtsps")
+
+
+def validate_stream_url(url: str, where: str) -> str:
+    """녹화에 쓸 스트림 주소 형식 검사(주소 자체는 로그에 남기지 않는다)."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(url)
+    except ValueError as exc:
+        raise CatalogError(f"{where}: stream_url 형식이 올바르지 않습니다.") from exc
+    if parsed.scheme not in STREAM_SCHEMES or not parsed.hostname:
+        raise CatalogError(f"{where}: stream_url 은 {', '.join(STREAM_SCHEMES)} 주소여야 합니다.")
+    return url
 
 
 class CatalogAdapter(Protocol):
@@ -477,6 +514,12 @@ def parse_camera(data: Any, index: int, settings: Settings) -> CameraRecord:
         status=status,
         observed_at=observed_at,
         clock=_parse_clock(data.get("clock"), where, settings),
+        stream_url=(
+            validate_stream_url(url, where)
+            if (url := _text(data, "stream_url", where, max_len=2000, required=False))
+            else None
+        ),
+        stream_delay_seconds=_number(data, "stream_delay_seconds", where, minimum=0, maximum=120),
     )
 
 
@@ -511,6 +554,10 @@ def build_adapter(source: sqlite3.Row, settings: Settings) -> CatalogAdapter:
     config = json.loads(source["adapter"])
     if config.get("type") == "json_file":
         return JsonFileCatalogAdapter(Path(config["path"]), source["id"], settings)
+    if config.get("type") == "its":
+        raise CatalogError(
+            "ITS 소스는 전체 동기화하지 않습니다. 'gps2cctv serve' 가 기기 주변만 자동으로 갱신합니다."
+        )
     raise CatalogError(f"지원하지 않는 어댑터 유형입니다: {config.get('type')}")
 
 
@@ -524,6 +571,47 @@ class SyncResult:
 
 def camera_key(source_id: str, provider_camera_id: str) -> str:
     return f"{source_id}:{provider_camera_id}"
+
+
+def upsert_camera(conn: sqlite3.Connection, source_id: str, rec: CameraRecord, stamp: str) -> str:
+    """카메라 한 대를 넣거나 갱신한다(트랜잭션은 호출하는 쪽에서 관리)."""
+    cam_id = camera_key(source_id, rec.provider_camera_id)
+    conn.execute(
+        """
+        INSERT INTO camera(id, source_id, provider_camera_id, name, latitude, longitude,
+            location_uncertainty_m, coverage_radius_m, road_name, road_direction, status,
+            observed_at, synced_at, stream_url, stream_url_fetched_at, stream_delay_seconds)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET name = excluded.name,
+            latitude = excluded.latitude, longitude = excluded.longitude,
+            location_uncertainty_m = excluded.location_uncertainty_m,
+            coverage_radius_m = excluded.coverage_radius_m,
+            road_name = excluded.road_name, road_direction = excluded.road_direction,
+            status = excluded.status, observed_at = excluded.observed_at,
+            synced_at = excluded.synced_at, stream_url = excluded.stream_url,
+            stream_url_fetched_at = excluded.stream_url_fetched_at,
+            stream_delay_seconds = excluded.stream_delay_seconds
+        """,
+        (
+            cam_id,
+            source_id,
+            rec.provider_camera_id,
+            rec.name,
+            rec.latitude,
+            rec.longitude,
+            rec.location_uncertainty_m,
+            rec.coverage_radius_m,
+            rec.road_name,
+            rec.road_direction,
+            rec.status,
+            to_db(rec.observed_at),
+            stamp,
+            rec.stream_url,
+            stamp if rec.stream_url else None,
+            rec.stream_delay_seconds,
+        ),
+    )
+    return cam_id
 
 
 def sync_cameras(
@@ -547,36 +635,7 @@ def sync_cameras(
         for rec in records:
             cam_id = camera_key(source_id, rec.provider_camera_id)
             seen.add(cam_id)
-            conn.execute(
-                """
-                INSERT INTO camera(id, source_id, provider_camera_id, name, latitude, longitude,
-                    location_uncertainty_m, coverage_radius_m, road_name, road_direction, status,
-                    observed_at, synced_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET name = excluded.name,
-                    latitude = excluded.latitude, longitude = excluded.longitude,
-                    location_uncertainty_m = excluded.location_uncertainty_m,
-                    coverage_radius_m = excluded.coverage_radius_m,
-                    road_name = excluded.road_name, road_direction = excluded.road_direction,
-                    status = excluded.status, observed_at = excluded.observed_at,
-                    synced_at = excluded.synced_at
-                """,
-                (
-                    cam_id,
-                    source_id,
-                    rec.provider_camera_id,
-                    rec.name,
-                    rec.latitude,
-                    rec.longitude,
-                    rec.location_uncertainty_m,
-                    rec.coverage_radius_m,
-                    rec.road_name,
-                    rec.road_direction,
-                    rec.status,
-                    to_db(rec.observed_at),
-                    stamp,
-                ),
-            )
+            upsert_camera(conn, source_id, rec, stamp)
             # 제공처가 밝힌 시각 정보는 카탈로그의 최신 값으로 교체한다(사용자 관측값은 유지).
             conn.execute(
                 "DELETE FROM camera_time_model WHERE camera_id = ? AND evidence = 'provider_declared'",

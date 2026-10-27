@@ -1,13 +1,71 @@
-# gps2cctv 설정 예시. 복사해서 config.toml 로 저장한 뒤 --config config.toml 로 지정하세요.
-# (config.toml 은 .gitignore 에 포함되어 커밋되지 않습니다.)
-# 키 이름은 src/gps2cctv/config.py 의 Settings 필드와 같아야 하며, 알 수 없는 키는 오류입니다.
+# gps2cctv 설정 예시. config.toml 로 복사해 고친 뒤 사용하세요(config.toml 은 커밋되지 않음).
+#   gps2cctv --config config.toml serve
+# 알 수 없는 키는 오타로 보고 오류를 냅니다. 적지 않은 값은 아래에 적힌 기본값을 씁니다.
+
+# =============================================================================
+# 1. 실시간 자동 녹화 (serve)
+# =============================================================================
+
+[server]
+listen = "0.0.0.0"   # Traccar 앱이 접속할 주소
+port = 5055          # Traccar 기본 포트(OsmAnd 프로토콜)와 같게 두면 편합니다
+data_dir = "data"    # 클립·버퍼 저장 위치(Docker는 환경 변수로 /data 사용)
+
+# GPS를 보낼 기기. Traccar 앱 설정의 "기기 식별자(Device identifier)"와 똑같이 적습니다.
+# 다른 사람이 추측해 위치를 보낼 수 없도록 10자 이상의 임의 문자열을 권장합니다.
+[[devices]]
+id = "my-phone-CHANGE-ME-7f3a9c2e"
+name = "내 휴대폰"
+
+# 차량용 GPS 추적기 등 기기를 더 붙이려면 [[devices]] 를 반복합니다.
+# [[devices]]
+# id = "my-car-CHANGE-ME-91b4d0aa"
+# name = "내 차"
+
+# 국가교통정보센터(ITS) CCTV 오픈 API — 고속도로·국도 CCTV 실시간 스트림
+# API 키는 ITS 누리집(its.go.kr) 공개 데이터에서 발급받아 여기에 적거나
+# 환경 변수 GPS2CCTV_ITS_API_KEY 로 넘깁니다.
+[its]
+api_key = ""
+road_types = ["ex", "its"]   # ex: 고속도로, its: 국도
+cctv_type = 4                # 4: 실시간 HLS(HTTPS). 카메라가 하나도 안 잡히면 1(HTTP)로 바꿔 보세요.
+# refresh_minutes = 30.0
+# stream_url_max_age_minutes = 5.0
+# coverage_radius_m = 150.0  # ITS 카메라 촬영 반경 가정
+
+# 본인 소유 카메라(RTSP/HLS) 등 스트림 주소가 있는 카메라 목록 파일(선택)
+# 형식: fixtures/synthetic/cameras_city.json 과 같고 카메라마다 "stream_url" 을 추가합니다.
+# [[camera_files]]
+# path = "my_cameras.json"
+# source_id = "my-cams"
+# provider_name = "본인 소유 카메라"
+
+[recording]
+pre_seconds = 2.0               # 통과 구간 앞에 더 저장할 시간
+post_seconds = 2.0              # 통과 구간 뒤에 더 저장할 시간
+include_time_uncertainty = true # 스트림 시각 추정 오차만큼 더 넓힘(끄면 차가 잘릴 수 있음)
+arm_lookahead_seconds = 60.0    # 이 시간 안에 도착할 앞쪽 카메라를 미리 녹화 대기
+max_concurrent_streams = 6
+max_clip_seconds = 180.0        # 카메라 앞에 오래 서 있을 때 최대 저장 길이
+stream_delay_seconds = 3.0      # 시각 태그 없는 스트림의 추정 지연(촬영 → 재생목록)
+stream_delay_uncertainty_seconds = 4.0
+clip_retention_days = 14        # 보호하지 않은 클립 자동 삭제
+position_retention_days = 14
+max_storage_gb = 20.0           # 넘으면 보호하지 않은 오래된 클립부터 삭제
+viewing_copy = "trim_reencode"  # trim_reencode | remux | none
+hard_brake_drop_mps = 7.0       # 3초 안에 약 25km/h 이상 줄고 거의 멈추면 사고 의심 → 주변 클립 보호
+auto_incident = true            # 사고 의심 때 사건·보존 요청 후보까지 자동 생성
+
+# =============================================================================
+# 2. 계산·보존 기본값 (수동 사건 처리와 공통)
+# =============================================================================
 
 [privacy]
-route_precision_decimals = 4          # 경로 좌표 저장 정밀도(소수점 자리). 4자리 ≈ 11m
-default_incident_retention_days = 90  # 사건 자료 기본 보존 기간
+route_precision_decimals = 4          # 사건 자료에 저장하는 경로 좌표 정밀도(소수점 자리)
+default_incident_retention_days = 90
 max_incident_retention_days = 1095
 audit_retention_days = 365
-max_incident_window_seconds = 7200    # 사고 전후 확인 범위 상한(최소 수집)
+max_incident_window_seconds = 7200
 
 [incident]
 default_before_seconds = 600
@@ -17,14 +75,14 @@ default_location_uncertainty_m = 50.0
 
 [candidates]
 default_coverage_radius_m = 100.0     # 카탈로그에 촬영 반경이 없을 때
-default_gps_accuracy_m = 25.0         # 경로에 정확도가 없을 때
+default_gps_accuracy_m = 25.0         # 위치에 정확도가 없을 때
 gps_time_margin_seconds = 2.0
 max_gap_seconds = 30.0                # 이보다 긴 GPS 공백은 도달 가능 범위로 계산
 gap_speed_factor = 1.3
 gap_min_speed_mps = 5.0
 gap_max_speed_mps = 45.0
 location_only_padding_seconds = 120.0
-max_review_window_seconds = 900.0     # 이보다 넓은 요청 범위는 사용자 검토로 전환
+max_review_window_seconds = 900.0
 request_rounding_seconds = 10
 unknown_clock_uncertainty_seconds = 180.0
 default_clock_drift_seconds_per_day = 2.0
@@ -33,9 +91,7 @@ stale_clock_model_days = 30.0
 deletion_warning_days = 3
 
 [policy]
-# 실제(production) 소스의 공식 엔드포인트 호스트 허용 목록.
-# 정확한 호스트 이름 또는 '.'으로 시작하는 하위 도메인 규칙만 씁니다.
-# 제공처의 약관·보존 절차를 검토한 뒤에만 추가하세요. 비어 있으면 실제 소스는 모두 거부됩니다.
+# 추가로 허용할 실제 제공처 엔드포인트 호스트([its] 주소는 자동으로 허용)
 allowed_hosts = []
 
 [display]

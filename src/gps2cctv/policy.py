@@ -8,7 +8,7 @@
 3. 공식 엔드포인트·약관 URL이 HTTPS이고, 실제(production) 소스는 호스트 허용 목록에 포함
    (합성 소스는 실제 요청이 불가능한 예약 도메인 .invalid/.test/.example 만 허용)
 4. 가장 최근 정책 검토 기록(policy snapshot)이 있고, 유효 기간 안이며, 해당 행위를 허용
-5. 영상 수집(media_capture)은 현재 버전에서 항상 거부
+5. 영상 녹화(media_capture)는 소스가 video 기능을 제공하고 정책 검토에서 명시적으로 허용한 경우만
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ ACTIONS: dict[str, str] = {
     "preservation_request_prepare": "preservation_request",
     "media_capture": "video",
 }
-REVIEWABLE_ACTIONS = frozenset(a for a in ACTIONS if a != "media_capture")
+REVIEWABLE_ACTIONS = frozenset(ACTIONS)
 CAPABILITIES = frozenset({"catalog", "metadata", "video", "preservation_request"})
 SYNTHETIC_TLDS = (".invalid", ".test", ".example")
 
@@ -39,7 +39,6 @@ REASON_TEXT: dict[str, str] = {
     "source_not_found": "등록되지 않은 소스",
     "source_disabled": "비활성화된 소스",
     "unknown_action": "알 수 없는 행위",
-    "media_capture_disabled": "영상 수집은 현재 버전에서 지원하지 않음",
     "capability_missing": "소스가 해당 기능을 제공하지 않음",
     "endpoint_invalid": "공식 엔드포인트 주소가 올바르지 않음",
     "endpoint_not_https": "공식 엔드포인트가 HTTPS가 아님",
@@ -136,16 +135,16 @@ def evaluate(
         return deny("source_disabled")
     if action not in ACTIONS:
         return deny("unknown_action")
-    if action == "media_capture":
-        return deny("media_capture_disabled")
     if ACTIONS[action] not in set(json.loads(source["capabilities"])):
         return deny("capability_missing")
-    problem = endpoint_problem(source["environment"], source["official_endpoint"], settings)
-    if problem:
-        return deny(problem)
-    problem = terms_problem(source["terms_url"])
-    if problem:
-        return deny(problem)
+    if source["environment"] != "owned":
+        # 본인 소유 장비(owned)는 외부 제공처가 아니므로 엔드포인트·약관 검사를 하지 않는다.
+        problem = endpoint_problem(source["environment"], source["official_endpoint"], settings)
+        if problem:
+            return deny(problem)
+        problem = terms_problem(source["terms_url"])
+        if problem:
+            return deny(problem)
     snapshot = latest_snapshot(conn, source_id)
     if snapshot is None:
         return deny("policy_snapshot_missing")

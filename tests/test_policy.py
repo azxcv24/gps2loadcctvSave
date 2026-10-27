@@ -77,10 +77,10 @@ class TestRegistration:
         with pytest.raises(catalog.CatalogError):
             _register(conn, settings, tmp_path, terms_url="")
 
-    def test_media_capture_cannot_be_reviewed(self, conn, settings, tmp_path):
+    def test_unknown_action_cannot_be_reviewed(self, conn, settings, tmp_path):
         _register(conn, settings, tmp_path)
-        with pytest.raises(catalog.CatalogError, match="영상 수집"):
-            _review(conn, settings, "synthetic-city", actions=["media_capture"])
+        with pytest.raises(catalog.CatalogError, match="알 수 없는 행위"):
+            _review(conn, settings, "synthetic-city", actions=["face_recognition"])
 
 
 class TestDecisions:
@@ -117,9 +117,21 @@ class TestDecisions:
         catalog.set_source_enabled(conn, source, False, NOW, settings)
         assert decide(conn, settings).reason_code == "source_disabled"
 
-    def test_media_capture_always_denied(self, conn, settings, source):
-        _review(conn, settings, source)
-        assert decide(conn, settings, "media_capture").reason_code == "media_capture_disabled"
+    def test_media_capture_needs_video_capability_and_explicit_review(
+        self, conn, settings, tmp_path
+    ):
+        # 기본 합성 소스는 video 기능이 없음
+        source = _register(conn, settings, tmp_path)
+        _review(conn, settings, source, actions=[*ALL_ACTIONS, "media_capture"])
+        assert decide(conn, settings, "media_capture").reason_code == "capability_missing"
+        # video 기능이 있어도 검토에서 허용하지 않으면 거부
+        later = NOW + timedelta(seconds=1)
+        _register(conn, settings, tmp_path, now=later, capabilities=["catalog", "video"])
+        _review(conn, settings, source, now=later + timedelta(seconds=1))
+        result = decide(conn, settings, "media_capture", now=later + timedelta(seconds=2))
+        assert result.reason_code == "action_not_allowed"
+        _review(conn, settings, source, actions=["media_capture"], now=later + timedelta(seconds=3))
+        assert decide(conn, settings, "media_capture", now=later + timedelta(seconds=4)).allowed
 
     def test_capability_missing(self, conn, settings, tmp_path):
         source = _register(conn, settings, tmp_path, capabilities=["catalog"])

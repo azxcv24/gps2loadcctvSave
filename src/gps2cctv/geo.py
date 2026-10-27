@@ -101,3 +101,18 @@ def closest_parameter(ax: float, ay: float, bx: float, by: float) -> float:
     if a < 1e-12:
         return 0.0
     return min(1.0, max(0.0, -(ax * dx + ay * dy) / a))
+
+
+def bearing_deg(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
+    """1 → 2 방향의 진행 방위각(북 0°, 시계 방향)."""
+    p1, p2 = math.radians(lat1), math.radians(lat2)
+    dl = math.radians(lon2 - lon1)
+    x = math.sin(dl) * math.cos(p2)
+    y = math.cos(p1) * math.sin(p2) - math.sin(p1) * math.cos(p2) * math.cos(dl)
+    return (math.degrees(math.atan2(x, y)) + 360.0) % 360.0
+
+
+def angle_difference(a: float, b: float) -> float:
+    """두 방위각의 차이(0~180°)."""
+    diff = abs(a - b) % 360.0
+    return 360.0 - diff if diff > 180.0 else diff

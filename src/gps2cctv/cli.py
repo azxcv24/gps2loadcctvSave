@@ -312,16 +312,98 @@ def cmd_preservation_update(args, conn, settings) -> int:
 
 
 def cmd_purge(args, conn, settings) -> int:
-    report = retention.purge_expired(conn, utc_now(), settings, dry_run=args.dry_run)
+    from .live.clips import purge_clips
+
+    now = utc_now()
+    report = retention.purge_expired(conn, now, settings, dry_run=args.dry_run)
+    clip_report = purge_clips(conn, now, settings, dry_run=args.dry_run)
     prefix = "[미리보기] 삭제 예정" if args.dry_run else "삭제 완료"
     print(
         f"{prefix}: 사건 {len(report.incident_ids)}건, 경로 지점 {report.route_points}개, "
         f"후보 {report.candidates}건, 보존 요청 {report.preservation_requests}건, "
-        f"감사 로그 {report.audit_events}건"
+        f"감사 로그 {report.audit_events}건, 자동 저장 클립 {clip_report.expired_clips}건, "
+        f"수신 위치 {clip_report.positions}개"
     )
     if not args.dry_run:
         print("  삭제 검증: " + ("통과" if report.verified else f"실패 {report.leftovers}"))
     return 0 if report.verified else 1
+
+
+def cmd_serve(args, conn, settings) -> int:
+    import logging
+
+    from .live.serve import run_serve
+
+    if not args.config:
+        raise Gps2CctvError(
+            "serve 에는 --config 설정 파일이 필요합니다(예: config.example.toml 참고)."
+        )
+    logging.basicConfig(
+        level=logging.DEBUG if args.verbose else logging.INFO,
+        format="%(asctime)s %(levelname)s %(message)s",
+    )
+    return run_serve(Path(args.config), Path(args.db), settings)
+
+
+def _recording_config(args):
+    from .live.config import RecordingConfig, load_live_config
+
+    if args.config:
+        try:
+            return load_live_config(Path(args.config)).recording
+        except Gps2CctvError:
+            pass
+    return RecordingConfig()
+
+
+def cmd_clips_list(args, conn, settings) -> int:
+    from .live.clips import list_clips
+    from .timeutil import from_db
+
+    tz = settings.display_timezone
+    rows = list_clips(conn, device_id=args.device, limit=args.limit, protected_only=args.protected)
+    if not rows:
+        print("저장된 클립이 없습니다.")
+        return 0
+    status_text = {"saved": "저장", "partial": "일부만", "failed": "실패"}
+    for r in rows:
+        start, end = from_db(r["window_start"]), from_db(r["window_end"])
+        mark = " [보호]" if r["protected"] else ""
+        path = r["viewing_path"] or r["original_path"] or f"({r['failure_reason']})"
+        print(
+            f"{r['id']}  {fmt_local(from_db(r['estimated_passage_at']), tz)}  {r['device_id']}  "
+            f"{r['camera_name'] or r['camera_id']}  {status_text.get(r['status'], r['status'])}"
+            f"{mark}  {(end - start).total_seconds():.0f}초"
+        )
+        print(f"    {path}")
+    return 0
+
+
+def cmd_clips_protect(args, conn, settings) -> int:
+    from .live.clips import set_protected
+
+    protect = args.cmd == "protect"
+    if not set_protected(conn, args.clip_id, protect, utc_now(), settings):
+        raise Gps2CctvError(f"클립을 찾을 수 없습니다: {args.clip_id}")
+    print(f"{args.clip_id}: {'보호(자동 삭제 안 함)' if protect else '보호 해제'}")
+    return 0
+
+
+def cmd_clips_mark(args, conn, settings) -> int:
+    from .live.clips import mark_event
+
+    rec = _recording_config(args)
+    at = parse_timestamp(args.time, args.assume_tz) if args.time else utc_now()
+    event_id, protected = mark_event(
+        conn, device_id=args.device, kind="manual", at=at, latitude=None, longitude=None,
+        detail=None, protect_before_seconds=rec.event_protect_before_seconds,
+        protect_after_seconds=rec.event_protect_after_seconds, now=utc_now(), settings=settings,
+    )  # fmt: skip
+    print(
+        f"{event_id}: {fmt_local(at, settings.display_timezone)} 전후 클립을 보호합니다 "
+        f"(지금 보호한 클립 {protected}건, 이후 저장되는 해당 구간 클립도 보호)"
+    )
+    return 0
 
 
 def cmd_audit_list(args, conn, settings) -> int:
@@ -470,7 +552,36 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--at", help="실제 제출·응답 시각(기본: 지금)")
     p.add_argument("--assume-tz")
 
-    p = add(groups, "purge", cmd_purge, "보존 기간이 지난 사건·감사 로그 삭제")
+    p = add(
+        groups,
+        "serve",
+        cmd_serve,
+        "실시간 자동 녹화: GPS 수신 → 앞 CCTV 녹화 대기 → 지나간 구간 자동 저장",
+    )
+    p.add_argument("--verbose", action="store_true", help="자세한 로그")
+    p.set_defaults(no_conn=True)
+
+    clips = groups.add_parser("clips", help="자동 저장된 CCTV 클립")
+    clips_sub = clips.add_subparsers(dest="cmd", required=True, metavar="<하위 명령>")
+    p = add(clips_sub, "list", cmd_clips_list, "저장된 클립 목록")
+    p.add_argument("--device")
+    p.add_argument("--limit", type=int, default=50)
+    p.add_argument("--protected", action="store_true", help="보호된 클립만")
+    p = add(clips_sub, "protect", cmd_clips_protect, "클립을 보호(보존 기간이 지나도 삭제 안 함)")
+    p.add_argument("clip_id")
+    p = add(clips_sub, "unprotect", cmd_clips_protect, "클립 보호 해제")
+    p.add_argument("clip_id")
+    p = add(
+        clips_sub,
+        "mark",
+        cmd_clips_mark,
+        "사고 등 중요한 시점을 표시해 앞뒤 클립을 보호(이후 저장되는 클립 포함)",
+    )
+    p.add_argument("--device", required=True)
+    p.add_argument("--time", help="표시할 시각(기본: 지금)")
+    p.add_argument("--assume-tz")
+
+    p = add(groups, "purge", cmd_purge, "보존 기간이 지난 사건·감사 로그·클립 삭제")
     p.add_argument("--dry-run", action="store_true", help="삭제하지 않고 대상만 보기")
 
     aud = groups.add_parser("audit", help="감사 로그")
@@ -486,6 +597,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         settings = load_settings(Path(args.config) if args.config else None)
+        if getattr(args, "no_conn", False):
+            return args.func(args, None, settings)
         conn = connect(Path(args.db))
         try:
             return args.func(args, conn, settings)
