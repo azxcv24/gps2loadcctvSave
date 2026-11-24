@@ -10,7 +10,7 @@ import pytest
 
 from gps2cctv import catalog, db
 from gps2cctv.cli import main
-from gps2cctv.config import ConfigError, Settings, load_settings
+from gps2cctv.config import ConfigError, load_settings
 from gps2cctv.live.config import ITS_API_KEY_ENV, load_live_config, parse_live_config
 from gps2cctv.live.engine import Store
 from gps2cctv.live.its import ItsCatalog, ItsError
@@ -200,7 +200,6 @@ def test_settings_loader_ignores_live_sections(tmp_path):
     path = tmp_path / "c.toml"
     path.write_text(CONFIG, encoding="utf-8")
     assert load_settings(path).default_coverage_radius_m == 120.0
-    assert isinstance(Settings(), Settings)
 
 
 def test_its_section_allows_its_host_for_manual_commands(tmp_path):

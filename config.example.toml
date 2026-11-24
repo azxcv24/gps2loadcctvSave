@@ -10,6 +10,7 @@
 listen = "0.0.0.0"   # Traccar 앱이 접속할 주소
 port = 5055          # Traccar 기본 포트(OsmAnd 프로토콜)와 같게 두면 편합니다
 data_dir = "data"    # 클립·버퍼 저장 위치(Docker는 환경 변수로 /data 사용)
+max_body_bytes = 65536
 
 # GPS를 보낼 기기. Traccar 앱 설정의 "기기 식별자(Device identifier)"와 똑같이 적습니다.
 # 다른 사람이 추측해 위치를 보낼 수 없도록 10자 이상의 임의 문자열을 권장합니다.
@@ -27,14 +28,21 @@ name = "내 휴대폰"
 # 환경 변수 GPS2CCTV_ITS_API_KEY 로 넘깁니다.
 [its]
 api_key = ""
+endpoint = "https://openapi.its.go.kr:9443/cctvInfo"
 road_types = ["ex", "its"]   # ex: 고속도로, its: 국도
 cctv_type = 4                # 4: 실시간 HLS(HTTPS). 카메라가 하나도 안 잡히면 1(HTTP)로 바꿔 보세요.
-# refresh_minutes = 30.0
-# stream_url_max_age_minutes = 5.0
-# coverage_radius_m = 150.0  # ITS 카메라 촬영 반경 가정
+tile_degrees = 0.1           # 이 크기(도) 단위로 기기 주변 카메라 목록을 받음
+refresh_minutes = 30.0
+stream_url_max_age_minutes = 5.0
+coverage_radius_m = 150.0    # ITS 카메라 촬영 반경 가정
+location_uncertainty_m = 20.0
+request_timeout_seconds = 10.0
+min_request_interval_seconds = 1.0
 
 # 본인 소유 카메라(RTSP/HLS) 등 스트림 주소가 있는 카메라 목록 파일(선택)
 # 형식: fixtures/synthetic/cameras_city.json 과 같고 카메라마다 "stream_url" 을 추가합니다.
+# 파일 안에 "source_id" 를 적었다면 아래 source_id 와 같아야 합니다(적지 않아도 됨).
+# Docker에서는 이 파일도 컨테이너의 /config 아래에 마운트하세요(docker-compose.yml 참고).
 # [[camera_files]]
 # path = "my_cameras.json"
 # source_id = "my-cams"
@@ -45,17 +53,31 @@ pre_seconds = 2.0               # 통과 구간 앞에 더 저장할 시간
 post_seconds = 2.0              # 통과 구간 뒤에 더 저장할 시간
 include_time_uncertainty = true # 스트림 시각 추정 오차만큼 더 넓힘(끄면 차가 잘릴 수 있음)
 arm_lookahead_seconds = 60.0    # 이 시간 안에 도착할 앞쪽 카메라를 미리 녹화 대기
+arm_min_radius_m = 300.0        # 느리게 움직여도 이 거리 안의 카메라는 녹화 대기
+arm_heading_tolerance_deg = 75.0  # 진행 방향에서 이 각도 안쪽 카메라만 미리 녹화
 max_concurrent_streams = 6
 max_clip_seconds = 180.0        # 카메라 앞에 오래 서 있을 때 최대 저장 길이
+buffer_seconds = 300.0          # 녹화 대기 버퍼 보관 시간(max_clip_seconds + pre + 60 이상)
 stream_delay_seconds = 3.0      # 시각 태그 없는 스트림의 추정 지연(촬영 → 재생목록)
 stream_delay_uncertainty_seconds = 4.0
+pdt_uncertainty_seconds = 1.0   # 시각 태그가 있는 스트림의 오차
+stream_request_timeout_seconds = 10.0
+segment_settle_seconds = 4.0    # 통과 직후 장면이 스트림에 들어올 때까지 처음 기다리는 시간
 clip_retention_days = 14        # 보호하지 않은 클립 자동 삭제
 position_retention_days = 14
 max_storage_gb = 20.0           # 넘으면 보호하지 않은 오래된 클립부터 삭제
 viewing_copy = "trim_reencode"  # trim_reencode | remux | none
-hard_brake_drop_mps = 7.0       # 3초 안에 약 25km/h 이상 줄고 거의 멈추면 사고 의심 → 주변 클립 보호
+hard_brake_drop_mps = 7.0       # 아래 시간 안에 이만큼(약 25km/h) 줄고 거의 멈추면 사고 의심
+hard_brake_window_seconds = 3.0
+hard_brake_stop_mps = 3.0
+event_protect_before_seconds = 600.0  # 사고 의심 시점 앞 10분 클립 보호
+event_protect_after_seconds = 300.0   # 사고 의심 시점 뒤 5분 클립 보호
 auto_incident = true            # 사고 의심 때 사건·보존 요청 후보까지 자동 생성
+track_window_seconds = 900.0    # 통과 계산에 쓰는 최근 경로 길이
+stationary_radius_m = 30.0      # 이 반경 안에 머물면 정차로 봄
+stationary_seconds = 120.0
 gps_silence_seconds = 30.0      # 카메라 반경 안에서 위치가 이만큼 끊기면 마지막 위치까지 저장
+stationary_silence_seconds = 600.0  # 멈춰 있던 기기는 위치 전송이 뜸하므로 이만큼 기다림
 max_fix_accuracy_m = 150.0      # 이보다 부정확한 위치(기지국 위치 등)로는 카메라를 판단하지 않음
 
 # =============================================================================
@@ -78,6 +100,7 @@ default_location_uncertainty_m = 50.0
 [candidates]
 default_coverage_radius_m = 100.0     # 카탈로그에 촬영 반경이 없을 때
 default_gps_accuracy_m = 25.0         # 위치에 정확도가 없을 때
+poor_gps_accuracy_m = 100.0           # 이보다 부정확한 위치로 계산한 통과는 신뢰도 '낮음' 
 gps_time_margin_seconds = 2.0
 max_gap_seconds = 30.0                # 이보다 긴 GPS 공백은 도달 가능 범위로 계산
 gap_speed_factor = 1.3

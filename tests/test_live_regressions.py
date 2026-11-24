@@ -48,9 +48,8 @@ class TestPassageLifecycle:
         idle(engine, clock, 40)
         rows = clips(store)
         assert [json.loads(r["flags"]) for r in rows] == [["capped"], ["continuation"]]
-        first_end = datetime.fromisoformat(rows[0]["exit_at"].replace("Z", "+00:00"))
-        second_start = datetime.fromisoformat(rows[1]["entry_at"].replace("Z", "+00:00"))
-        assert abs((second_start - first_end).total_seconds()) < 3  # 이어지는 구간
+        # 두 클립의 저장 구간이 빈틈·겹침 없이 이어진다
+        assert rows[0]["window_end"] == rows[1]["window_start"]
         assert all(r["status"] == "saved" for r in rows)
 
     def test_park_then_leave_saves_arrival_and_departure(self, world):

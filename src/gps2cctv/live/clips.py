@@ -67,9 +67,13 @@ class ClipPlan:
     due_at: datetime
     flags: set[str] = field(default_factory=set)
     capped: bool = False
-    attempts: int = 0
+    # 스트림에 장면이 도착하기를 기다리는 동안의 진행 상황
+    last_latest: datetime | None = None
+    progress_at: datetime | None = None
     # 이 클립을 자를 녹화기(녹화기가 바뀌어도 예약 당시 버퍼를 쓰도록)
     recorder: Any = field(default=None, repr=False, compare=False)
+    # 엔진이 기록하는 예약 구간 [시작, 끝](클립이 늘어나면 함께 갱신)
+    cover: Any = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -180,7 +184,10 @@ def build_clip(
     segments = recorder.segments_overlapping(want_start, want_end)
     if not segments:
         return failed("no_footage", mapping, unc)
-    covered_start, covered_end = segments[0].real_start, segments[-1].real_end
+    covered_start = min(s.real_start for s in segments)
+    covered_end = max(s.real_end for s in segments)
+    # 원본 파일은 받은 순서(파일 이름 순서) 그대로 잇는다 — 시각 추정이 바뀌어도 순서가 섞이지 않게
+    stream_order = sorted(segments, key=lambda s: s.path.name)
     partial = (
         seconds_between(want_start, covered_start) > 0.5
         or seconds_between(covered_end, want_end) > 0.5
@@ -199,7 +206,7 @@ def build_clip(
         os.chmod(original, 0o600)
         if recorder.init_data:
             out.write(recorder.init_data)
-        for seg in segments:
+        for seg in stream_order:
             with seg.path.open("rb") as handle:
                 shutil.copyfileobj(handle, out)
     original_sha = sha256_file(original)
@@ -262,7 +269,7 @@ def build_clip(
                 "mapping": s.mapping,
                 "bytes": s.size,
             }
-            for s in segments
+            for s in stream_order
         ],
         "files": {
             "original": original.name,

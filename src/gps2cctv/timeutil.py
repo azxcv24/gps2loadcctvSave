@@ -48,7 +48,16 @@ def parse_timestamp(text: str, assume_tz: str | None = None) -> datetime:
                 f"시간대가 없는 시각입니다: {raw!r}. "
                 "예: 2026-10-26T14:32:10+09:00 처럼 시간대를 붙이거나 --assume-tz 를 지정하세요."
             )
-        value = value.replace(tzinfo=get_zone(assume_tz))
+        zone = get_zone(assume_tz)
+        early = value.replace(tzinfo=zone, fold=0)
+        late = value.replace(tzinfo=zone, fold=1)
+        if early.utcoffset() != late.utcoffset():
+            # 서머타임 전환으로 두 번 있거나(모호) 아예 없는 시각: 추측하면 1시간씩 어긋난다.
+            raise TimeInputError(
+                f"{raw!r} 는 {assume_tz} 의 서머타임 전환 구간이라 실제 시각을 정할 수 없습니다. "
+                "시간대(예: +02:00)를 붙여 입력하세요."
+            )
+        value = early
     return value.astimezone(UTC)
 
 
@@ -102,9 +111,22 @@ def seconds_between(start: datetime, end: datetime) -> float:
     return (end - start).total_seconds()
 
 
-def fmt_local(value: datetime, tz_name: str, *, with_date: bool = True) -> str:
-    """사람이 읽는 표시용 시각(초 단위 반올림)."""
-    local = (value + timedelta(microseconds=500_000)).replace(microsecond=0)
+def fmt_local(
+    value: datetime, tz_name: str, *, with_date: bool = True, rounding: str = "nearest"
+) -> str:
+    """사람이 읽는 표시용 시각(초 단위).
+
+    ``rounding``: nearest(반올림), floor(범위 시작에 사용), ceil(범위 끝에 사용).
+    범위를 표시할 때 시작은 내림·끝은 올림해야 계산한 범위보다 좁아 보이지 않는다.
+    """
+    if rounding == "floor":
+        local = value.replace(microsecond=0)
+    elif rounding == "ceil":
+        local = (
+            value if value.microsecond == 0 else value.replace(microsecond=0) + timedelta(seconds=1)
+        )
+    else:
+        local = (value + timedelta(microseconds=500_000)).replace(microsecond=0)
     local = local.astimezone(get_zone(tz_name))
     if with_date:
         return local.strftime("%Y-%m-%d %H:%M:%S %Z")

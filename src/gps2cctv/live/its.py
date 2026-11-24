@@ -223,18 +223,20 @@ class ItsCatalog:
         with self.store as conn, conn:
             for rec in records:
                 upsert_camera(conn, self.source_id, rec, stamp)
-            # 이번 응답에 없는 이 타일의 카메라는 목록에서 빠진 것으로 표시(녹화 대상에서 제외)
-            conn.execute(
-                """
-                UPDATE camera SET status = 'missing_from_catalog'
-                WHERE source_id = ? AND synced_at < ? AND status != 'missing_from_catalog'
-                  AND latitude >= ? AND latitude < ? AND longitude >= ? AND longitude < ?
-                """,
-                (
-                    self.source_id, stamp, tile[0] * size, (tile[0] + 1) * size,
-                    tile[1] * size, (tile[1] + 1) * size,
-                ),
-            )  # fmt: skip
+            # 이번 응답에 없는 이 타일의 카메라는 목록에서 빠진 것으로 표시(녹화 대상에서 제외).
+            # 빈 응답은 일시 장애일 수 있으므로 표시하지 않는다.
+            if records:
+                conn.execute(
+                    """
+                    UPDATE camera SET status = 'missing_from_catalog'
+                    WHERE source_id = ? AND synced_at < ? AND status != 'missing_from_catalog'
+                      AND latitude >= ? AND latitude < ? AND longitude >= ? AND longitude < ?
+                    """,
+                    (
+                        self.source_id, stamp, tile[0] * size, (tile[0] + 1) * size,
+                        tile[1] * size, (tile[1] + 1) * size,
+                    ),
+                )  # fmt: skip
         with self._lock:
             self.fresh[tile] = now
         log.info("ITS 타일 %s 갱신: 카메라 %d대", tile, len(records))

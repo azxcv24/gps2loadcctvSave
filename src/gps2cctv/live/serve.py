@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import shutil
 import signal
@@ -231,6 +232,8 @@ class LiveService:
 
 
 def run_serve(config_path: Path, db_path: Path, settings: Settings) -> int:
+    # 클립·버퍼·로그 등 서버가 만드는 모든 파일과 폴더를 소유자 전용(0600/0700)으로
+    os.umask(0o077)
     service = LiveService(config_path, db_path, settings)
     live = service.live
     for warning in live.warnings():

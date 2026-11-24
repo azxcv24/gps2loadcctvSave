@@ -11,14 +11,15 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from . import audit
 from .config import Settings
 from .errors import NotFoundError
 from .timeutil import to_db
 
-_DEPENDENT_TABLES = ("route_point", "camera_candidate", "preservation_request")
+# live_event 는 사건과 외래 키로 묶여 있지 않아(사건보다 먼저 생김) 직접 지운다.
+_DEPENDENT_TABLES = ("route_point", "camera_candidate", "preservation_request", "live_event")
 
 
 @dataclass
@@ -27,6 +28,7 @@ class DeletionReport:
     route_points: int = 0
     candidates: int = 0
     preservation_requests: int = 0
+    live_events: int = 0
     audit_events: int = 0
     leftovers: dict[str, int] = field(default_factory=dict)
     dry_run: bool = False
@@ -56,10 +58,12 @@ def _delete(conn: sqlite3.Connection, ids: list[str], report: DeletionReport) ->
     report.route_points = _count(conn, "route_point", ids)
     report.candidates = _count(conn, "camera_candidate", ids)
     report.preservation_requests = _count(conn, "preservation_request", ids)
+    report.live_events = _count(conn, "live_event", ids)
     if report.dry_run or not ids:
         return
     marks = ",".join("?" * len(ids))
     with conn:
+        conn.execute(f"DELETE FROM live_event WHERE incident_id IN ({marks})", ids)
         conn.execute(f"DELETE FROM incident WHERE id IN ({marks})", ids)
     report.leftovers = verify_deleted(conn, ids)
 
@@ -86,6 +90,7 @@ def delete_incident(
             "route_points": report.route_points,
             "candidates": report.candidates,
             "preservation_requests": report.preservation_requests,
+            "live_events": report.live_events,
         },
     )
     return report
@@ -94,7 +99,11 @@ def delete_incident(
 def purge_expired(
     conn: sqlite3.Connection, now: datetime, settings: Settings, *, dry_run: bool = False
 ) -> DeletionReport:
-    """보존 종료 시각이 지난 사건과 감사 로그를 지운다."""
+    """보존 종료 시각이 지난 사건·감사 로그, 오래된 사고 의심 이벤트를 지운다.
+
+    사고 의심 이벤트(위치 포함)는 사건 기본 보존 기간이 지나면 지운다. 이벤트로 보호된 클립은
+    클립 쪽 ``protected`` 표시로 계속 보호되므로 이벤트를 지워도 클립은 남는다.
+    """
     stamp = to_db(now)
     ids = [
         row["id"]
@@ -107,10 +116,16 @@ def purge_expired(
     report.audit_events = conn.execute(
         "SELECT COUNT(*) FROM audit_event WHERE retention_until <= ?", (stamp,)
     ).fetchone()[0]
+    event_cutoff = to_db(now - timedelta(days=settings.default_incident_retention_days))
+    old_events = conn.execute(
+        "SELECT COUNT(*) FROM live_event WHERE occurred_at <= ?", (event_cutoff,)
+    ).fetchone()[0]
+    report.live_events += old_events
     if dry_run:
         return report
     with conn:
         conn.execute("DELETE FROM audit_event WHERE retention_until <= ?", (stamp,))
+        conn.execute("DELETE FROM live_event WHERE occurred_at <= ?", (event_cutoff,))
     for incident_id in ids:
         audit.record(
             conn,
@@ -136,6 +151,7 @@ def purge_expired(
             "candidates": report.candidates,
             "preservation_requests": report.preservation_requests,
             "audit_events": report.audit_events,
+            "live_events": report.live_events,
         },
     )
     return report

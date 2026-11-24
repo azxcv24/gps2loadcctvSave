@@ -98,7 +98,14 @@ class TestRouteImport:
         assert result.stored + result.outside_window == len(points)
         assert result.outside_window > 0
         stored = incidents.load_route(conn, inc.id)
-        assert all(inc.started_at <= p.recorded_at <= inc.ended_at for p in stored)
+        # 범위 밖 지점은 경계 바로 밖 한 점씩(5분 이내)만 남긴다
+        outside = [p for p in stored if not inc.started_at <= p.recorded_at <= inc.ended_at]
+        assert len(outside) <= 2
+        assert all(
+            min(abs((p.recorded_at - inc.started_at).total_seconds()),
+                abs((p.recorded_at - inc.ended_at).total_seconds())) <= 300
+            for p in outside
+        )  # fmt: skip
         assert all(round(p.latitude, 4) == p.latitude for p in stored)
 
     def test_reimport_ignores_duplicates(self, conn, settings, incident):

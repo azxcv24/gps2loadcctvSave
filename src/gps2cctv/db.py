@@ -13,7 +13,14 @@ import os
 import sqlite3
 from pathlib import Path
 
+from .errors import Gps2CctvError
+
 SCHEMA_VERSION = 2
+
+
+class DatabaseError(Gps2CctvError):
+    """데이터베이스를 열거나 바꿀 수 없음."""
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS schema_meta (
@@ -292,7 +299,7 @@ def _migrate_v1_to_v2(conn: sqlite3.Connection) -> None:
                 conn.execute(f"ALTER TABLE camera ADD COLUMN {name} {kind}")
         problems = conn.execute("PRAGMA foreign_key_check").fetchall()
         if problems:
-            raise RuntimeError(f"마이그레이션 중 외래 키 오류: {problems[:3]}")
+            raise DatabaseError(f"마이그레이션 중 외래 키 오류: {[tuple(p) for p in problems[:3]]}")
         conn.execute("UPDATE schema_meta SET value = '2' WHERE key = 'schema_version'")
         conn.execute("COMMIT")
     except Exception:
@@ -320,8 +327,9 @@ def _prepare(conn: sqlite3.Connection) -> sqlite3.Connection:
     else:
         version = int(row["value"])
         if version > SCHEMA_VERSION:
-            raise RuntimeError(
-                f"데이터베이스 스키마 버전({version})이 프로그램({SCHEMA_VERSION})보다 새롭습니다."
+            raise DatabaseError(
+                f"데이터베이스 스키마 버전({version})이 프로그램({SCHEMA_VERSION})보다 새롭습니다. "
+                "프로그램을 최신 버전으로 바꾸세요."
             )
         while version < SCHEMA_VERSION:
             _MIGRATIONS[version](conn)

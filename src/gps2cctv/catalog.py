@@ -92,6 +92,10 @@ def _load_json(path: Path) -> Any:
         raise CatalogError(f"파일이 없습니다: {path}") from exc
     except json.JSONDecodeError as exc:
         raise CatalogError(f"{path.name}: JSON 형식 오류: {exc}") from exc
+    except UnicodeDecodeError as exc:
+        raise CatalogError(f"{path.name}: UTF-8 로 저장된 JSON 이어야 합니다.") from exc
+    except OSError as exc:
+        raise CatalogError(f"파일을 읽을 수 없습니다: {path} ({exc.strerror})") from exc
 
 
 # ---------------------------------------------------------------------------

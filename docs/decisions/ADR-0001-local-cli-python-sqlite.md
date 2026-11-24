@@ -1,8 +1,8 @@
 # ADR-0001: 단일 사용자 로컬 CLI · Python 표준 라이브러리 · SQLite
 
-- 상태: 제안
+- 상태: 채택 — v0.2에서 상시 실행 서버(`gps2cctv serve`)와 클립 파일 저장이 더해졌다([ADR-0005](ADR-0005-automatic-live-recording.md)). 단일 사용자·로컬 실행·SQLite 원칙은 유지
 - 날짜: 2026-10-26
-- 결정자: (저장소 소유자 승인 필요)
+- 결정자: BOKWANG
 
 ## 문맥
 
@@ -17,7 +17,7 @@ PLAN의 결정 후보 중 "단일 사용자용 로컬 도구와 서버형 운영
 
 - 단일 사용자 로컬 CLI(`gps2cctv`)로 시작한다.
 - Python 3.11 이상, **런타임 외부 의존성 없음**(표준 라이브러리만). 테스트에만 pytest를 쓴다.
-- 저장소는 SQLite 파일 하나(기본 `data/gps2cctv.sqlite3`, 권한 0600, `secure_delete` 사용).
+- 저장소는 SQLite 파일(기본 `data/gps2cctv.sqlite3`, 권한 0600, `secure_delete` 사용). v0.2부터 클립 영상은 `data/clips/` 아래 파일로 저장.
 
 ## 결과와 위험
 

@@ -12,6 +12,7 @@ CSV 형식(머리글 필수, UTF-8):
 from __future__ import annotations
 
 import csv
+import io
 import math
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
@@ -80,9 +81,27 @@ def _make_point(
     return RoutePoint(recorded_at, lat, lon, accuracy, speed)
 
 
+def _decode_text(path: Path) -> str:
+    """UTF-8(BOM 포함)로 읽고, 안 되면 한국어 엑셀 기본 인코딩(CP949)으로 읽는다."""
+    data = path.read_bytes()
+    for encoding in ("utf-8-sig", "cp949"):
+        try:
+            return data.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    raise RouteFileError(f"{path.name}: 글자 인코딩을 알 수 없습니다(UTF-8로 저장해 주세요).")
+
+
 def read_csv(path: Path, assume_tz: str | None = None) -> list[RoutePoint]:
+    try:
+        return _read_csv(path, assume_tz)
+    except csv.Error as exc:
+        raise RouteFileError(f"{path.name}: CSV 형식 오류: {exc}") from exc
+
+
+def _read_csv(path: Path, assume_tz: str | None) -> list[RoutePoint]:
     points: list[RoutePoint] = []
-    with path.open(newline="", encoding="utf-8-sig") as handle:
+    with io.StringIO(_decode_text(path), newline="") as handle:
         reader = csv.DictReader(handle)
         header = set(reader.fieldnames or [])
         missing = {"recorded_at", "latitude", "longitude"} - header

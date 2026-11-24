@@ -35,3 +35,4 @@ ignore = ["E501"]
 [tool.ruff.lint.per-file-ignores]
 # 다른 테스트 모듈의 pytest fixture 를 가져와 인자로 쓰는 패턴
 "tests/test_live_regressions.py" = ["F811"]
+"tests/test_live_lifecycle.py" = ["F811"]

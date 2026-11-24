@@ -50,6 +50,7 @@ REASON_TEXT: dict[str, str] = {
     "clock_model_stale": "CCTV 시각 오차 근거가 오래됨",
     "gps_gap": "GPS 기록 공백 구간 — 도달 가능 범위로 추정",
     "gps_accuracy_unknown": "GPS 정확도 정보 없음 — 기본값 적용",
+    "gps_accuracy_poor": "GPS 위치가 매우 부정확함(기지국 위치 등)",
     "route_starts_in_range": "경로 기록 시작 시점에 이미 촬영 반경 안",
     "route_ends_in_range": "경로 기록 종료 시점에도 촬영 반경 안",
     "location_only": "경로 없이 사고 위치·시각만으로 추정",
@@ -62,6 +63,7 @@ LOW_CONFIDENCE_REASONS = frozenset(
     {
         "clock_unknown",
         "gps_gap",
+        "gps_accuracy_poor",
         "location_only",
         "camera_status_inactive",
         "camera_missing_from_catalog",
@@ -259,6 +261,11 @@ def compute_passages(
                 if earliest > latest:
                     continue
                 flags.add("gps_gap")
+                # 공백 뒤 첫 위치가 이미 반경 안이면 통과는 아직 끝나지 않은 것이다(시작도 같음)
+                if i == last and math.hypot(bx, by) <= radius:
+                    flags.add("route_ends_in_range")
+                if i == 0 and math.hypot(ax, ay) <= radius:
+                    flags.add("route_starts_in_range")
                 start, end = shift(a.t, earliest), shift(a.t, latest)
                 hits.append(_Hit(start, end, start, end, None, None, radius, acc, dt, flags, speed))
                 continue
@@ -325,7 +332,14 @@ def compute_passages(
                 exit_at=hit.exit_at,
                 window_start=shift(hit.window_start, -margin),
                 window_end=shift(hit.window_end, margin),
-                flags=frozenset(hit.flags),
+                flags=frozenset(
+                    hit.flags
+                    | (
+                        {"gps_accuracy_poor"}
+                        if hit.accuracy_m > settings.poor_gps_accuracy_m
+                        else set()
+                    )
+                ),
                 details=details,
             )
         )
@@ -578,7 +592,10 @@ class CandidateRun:
 
 
 def _search_margin_m(
-    track: list[TrackPoint], conn: sqlite3.Connection, settings: Settings
+    track: list[TrackPoint],
+    conn: sqlite3.Connection,
+    settings: Settings,
+    precision_decimals: int | None,
 ) -> float:
     row = conn.execute(
         "SELECT MAX(coverage_radius_m), MAX(location_uncertainty_m) FROM camera"
@@ -594,7 +611,12 @@ def _search_margin_m(
         dt = seconds_between(a.t, b.t)
         if dt > settings.max_gap_seconds:
             max_gap_reach = max(max_gap_reach, settings.gap_max_speed_mps * dt)
-    return max_coverage + max_location + max_accuracy + max_gap_reach + 50.0
+    rounding = (
+        rounding_error_m(max(abs(p.lat) for p in track), precision_decimals)
+        if precision_decimals is not None
+        else 0.0
+    )
+    return max_coverage + max_location + max_accuracy + rounding + max_gap_reach + 50.0
 
 
 def find_candidates(
@@ -626,7 +648,7 @@ def find_candidates(
             "경로를 입력(incident import-route)하거나 사고 위치를 지정해 사건을 만드세요."
         )
 
-    margin_m = _search_margin_m(track, conn, settings)
+    margin_m = _search_margin_m(track, conn, settings, precision)
     lat_values = [p.lat for p in track]
     lon_values = [p.lon for p in track]
     dlat, dlon = degree_margins(max(abs(v) for v in lat_values), margin_m)

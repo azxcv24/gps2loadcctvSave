@@ -201,8 +201,8 @@ def _incident_lines(incident: Incident, route_points: int, settings: Settings) -
 def _candidate_lines(item: dict[str, Any], number: int, settings: Settings) -> list[str]:
     tz = settings.display_timezone
 
-    def t(value: str, with_date: bool = False) -> str:
-        return fmt_local(from_db(value), tz, with_date=with_date)
+    def t(value: str, with_date: bool = False, rounding: str = "nearest") -> str:
+        return fmt_local(from_db(value), tz, with_date=with_date, rounding=rounding)
 
     name = item["camera_name"] or "-"
     road = " / ".join(x for x in (item["road_name"], item["road_direction"]) if x)
@@ -224,16 +224,16 @@ def _candidate_lines(item: dict[str, Any], number: int, settings: Settings) -> l
         f"   시간 범위 신뢰도: {confidence}{review}",
         f"   예상 통과(표준시): {t(item['estimated_passage_at'])}   최근접 거리: {distance}",
         (
-            f"   확인 범위(표준시): {t(item['review_window']['start'])} ~ "
-            f"{t(item['review_window']['end'])}"
+            f"   확인 범위(표준시): {t(item['review_window']['start'], rounding='floor')} ~ "
+            f"{t(item['review_window']['end'], rounding='ceil')}"
         ),
         (
             f"   CCTV 시각 오차: {item['camera_clock']['offset_seconds']:+.1f}초 "
             f"± {item['camera_clock']['uncertainty_seconds']:.1f}초 (근거: {evidence})"
         ),
         (
-            f"   확인 범위(CCTV 시계): {t(item['camera_clock']['window_start'])} ~ "
-            f"{t(item['camera_clock']['window_end'])}"
+            f"   확인 범위(CCTV 시계): {t(item['camera_clock']['window_start'], rounding='floor')} ~ "
+            f"{t(item['camera_clock']['window_end'], rounding='ceil')}"
         ),
         (
             f"   ▶ 보존 요청 권장 범위(CCTV 표시 시각): {t(item['request_window']['start'], True)} ~ "

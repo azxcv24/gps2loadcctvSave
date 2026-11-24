@@ -318,7 +318,10 @@ class GpsHttpServer:
                 except ValueError:
                     self._reply(400)
                     return
-                if length < 0 or length > outer.max_body_bytes:
+                if length < 0:
+                    self._reply(400)
+                    return
+                if length > outer.max_body_bytes:
                     self._reply(413)
                     return
                 self._handle(self.rfile.read(length) if length > 0 else b"")

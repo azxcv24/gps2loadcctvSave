@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import math
 import sqlite3
 import uuid
 from dataclasses import dataclass
@@ -100,6 +101,8 @@ def create_incident(
     )
     before = settings.default_before_seconds if before_seconds is None else before_seconds
     after = settings.default_after_seconds if after_seconds is None else after_seconds
+    if not all(math.isfinite(v) for v in (unc, before, after)):
+        raise IncidentError("시간 범위와 불확실성은 유한한 숫자여야 합니다.")
     if unc < 0 or before < 0 or after < 0:
         raise IncidentError("시간 범위와 불확실성은 음수일 수 없습니다.")
     total = before + after + 2 * unc
@@ -122,8 +125,8 @@ def create_incident(
             if location_uncertainty_m is None
             else location_uncertainty_m
         )
-        if loc_unc < 0:
-            raise IncidentError("위치 불확실성은 음수일 수 없습니다.")
+        if not math.isfinite(loc_unc) or loc_unc < 0 or loc_unc > 100_000:
+            raise IncidentError("위치 불확실성은 0~100000m 사이의 숫자여야 합니다.")
 
     days = settings.default_incident_retention_days if retention_days is None else retention_days
     if not 1 <= days <= settings.max_incident_retention_days:
@@ -192,22 +195,47 @@ class RouteImportResult:
     duplicates: int
 
 
+# 사건 확인 범위 바로 밖의 지점도 이 시간 안이면 하나씩 저장한다. 범위 경계를 가로지르는
+# 구간(기록 간격이 길거나 GPS가 끊긴 경우)의 통과를 놓치지 않기 위함.
+BOUNDARY_POINT_MAX_SECONDS = 300
+
+
+def _select_points(points: list[RoutePoint], start: datetime, end: datetime) -> list[RoutePoint]:
+    ordered = sorted(points, key=lambda p: p.recorded_at)
+    inside = [p for p in ordered if start <= p.recorded_at <= end]
+    before = [p for p in ordered if p.recorded_at < start]
+    after = [p for p in ordered if p.recorded_at > end]
+    limit = timedelta(seconds=BOUNDARY_POINT_MAX_SECONDS)
+    selected = list(inside)
+    if before and start - before[-1].recorded_at <= limit:
+        selected.insert(0, before[-1])
+    if after and after[0].recorded_at - end <= limit:
+        selected.append(after[0])
+    return selected
+
+
 def import_route(
     conn: sqlite3.Connection,
     incident_id: str,
     points: list[RoutePoint],
     now: datetime,
     settings: Settings,
+    *,
+    replace: bool = False,
 ) -> RouteImportResult:
-    """사건 확인 범위 안의 경로 지점만 정밀도를 낮춰 저장한다."""
+    """사건 확인 범위 안(+경계 바로 밖 한 점씩)의 경로 지점만 정밀도를 낮춰 저장한다.
+
+    ``replace`` 가 참이면 기존 경로를 지우고 새로 저장한다(잘못 넣은 경로 교체).
+    """
     incident = get_incident(conn, incident_id)
     decimals = incident.precision_decimals
-    stored = outside = duplicates = 0
+    selected = _select_points(points, incident.started_at, incident.ended_at)
+    stored = duplicates = 0
+    outside = len(points) - len(selected)
     with conn:
-        for point in points:
-            if not incident.started_at <= point.recorded_at <= incident.ended_at:
-                outside += 1
-                continue
+        if replace:
+            conn.execute("DELETE FROM route_point WHERE incident_id = ?", (incident_id,))
+        for point in selected:
             cursor = conn.execute(
                 """
                 INSERT OR IGNORE INTO route_point(incident_id, recorded_at, latitude_rounded,
@@ -235,7 +263,12 @@ def import_route(
         resource_id=incident_id,
         now=now,
         settings=settings,
-        detail={"stored": stored, "outside_window": outside, "duplicates": duplicates},
+        detail={
+            "stored": stored,
+            "outside_window": outside,
+            "duplicates": duplicates,
+            "replaced": replace,
+        },
     )
     return RouteImportResult(stored, outside, duplicates)
 

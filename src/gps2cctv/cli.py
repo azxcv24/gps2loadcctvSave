@@ -30,8 +30,11 @@ DEFAULT_DB = Path("data") / "gps2cctv.sqlite3"
 
 def _write_private(path: Path, text: str) -> None:
     """소유자만 읽을 수 있는 파일(0600)로 저장한다."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+    except OSError as exc:
+        raise Gps2CctvError(f"파일로 저장할 수 없습니다: {path} ({exc.strerror})") from exc
     os.fchmod(fd, 0o600)  # 이미 있던 파일도 소유자 전용으로
     with os.fdopen(fd, "w", encoding="utf-8") as handle:
         handle.write(text)
@@ -206,7 +209,9 @@ def cmd_incident_list(args, conn, settings) -> int:
 
 def cmd_incident_import_route(args, conn, settings) -> int:
     points = read_route(Path(args.file), args.assume_tz)
-    result = incidents.import_route(conn, args.incident_id, points, utc_now(), settings)
+    result = incidents.import_route(
+        conn, args.incident_id, points, utc_now(), settings, replace=args.replace
+    )
     print(
         f"경로 지점 {result.stored}개 저장 "
         f"(사건 확인 범위 밖 {result.outside_window}개 버림, 중복 {result.duplicates}개 무시)"
@@ -428,7 +433,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="gps2cctv",
         description=(
             "GPS 경로와 사고 시점을 기준으로 주변 공식 CCTV의 확인·보존 요청 시간 범위를 "
-            "계산합니다. 영상 수집·식별·추적 기능은 없습니다."
+            "계산하고, serve 명령으로 지나간 구간의 CCTV 영상을 자동 저장합니다. "
+            "영상 속 사람·차량을 식별하거나 추적하지 않습니다."
         ),
     )
     parser.add_argument("--version", action="version", version=f"gps2cctv {__version__}")
@@ -461,7 +467,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument(
         "--actions",
         required=True,
-        help="허용 행위(쉼표 구분): catalog_sync,catalog_lookup,preservation_request_prepare",
+        help="허용 행위(쉼표 구분): catalog_sync,catalog_lookup,preservation_request_prepare,media_capture",
     )
     p.add_argument("--terms-ref", required=True, help="검토한 약관 버전 또는 해시")
     p.add_argument("--valid-days", type=int, default=90, help="검토 유효 기간(일, 기본 90)")
@@ -521,6 +527,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("incident_id")
     p.add_argument("file")
     p.add_argument("--assume-tz", help="시간대 없는 시각에 적용할 시간대")
+    p.add_argument("--replace", action="store_true", help="이미 넣은 경로를 지우고 새로 저장")
     p = add(inc_sub, "candidates", cmd_incident_candidates, "주변 카메라와 시간 범위 계산")
     p.add_argument("incident_id")
     p = add(inc_sub, "report", cmd_incident_report, "사건 보고서 보기·내보내기")
@@ -613,6 +620,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     except Gps2CctvError as exc:
         print(f"오류: {exc}", file=sys.stderr)
         return exc.exit_code
+    except OSError as exc:
+        name = f" ({exc.filename})" if exc.filename else ""
+        print(f"오류: 파일을 읽거나 쓸 수 없습니다{name}: {exc.strerror or exc}", file=sys.stderr)
+        return 1
 
 
 if __name__ == "__main__":

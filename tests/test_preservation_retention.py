@@ -151,6 +151,7 @@ class TestRetention:
             "route_point": 0,
             "camera_candidate": 0,
             "preservation_request": 0,
+            "live_event": 0,
         }
 
     def test_purge_respects_retention(self, conn, settings, run):

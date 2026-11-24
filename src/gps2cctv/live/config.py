@@ -101,6 +101,8 @@ class RecordingConfig:
     track_window_seconds: float = 900.0
     # 촬영 반경 안에서 위치가 이만큼 끊기면 마지막 위치까지의 구간을 저장
     gps_silence_seconds: float = 30.0
+    # 카메라 앞에서 멈춰 있던 기기는 위치 전송이 뜸해지므로 이만큼 기다린 뒤 끊김으로 본다
+    stationary_silence_seconds: float = 600.0
     # 이보다 부정확한 위치(기지국 위치 등)로는 카메라를 판단하지 않음
     max_fix_accuracy_m: float = 150.0
     stationary_radius_m: float = 30.0
@@ -250,6 +252,17 @@ def load_live_config(path: Path) -> LiveConfig:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ConfigError(f"설정 파일이 없습니다: {path}") from exc
+    except IsADirectoryError as exc:
+        raise ConfigError(
+            f"설정 파일 자리에 폴더가 있습니다: {path} (Docker는 없는 파일을 폴더로 만듭니다. "
+            "config.toml 을 먼저 만드세요)"
+        ) from exc
+    except PermissionError as exc:
+        raise ConfigError(
+            f"설정 파일을 읽을 권한이 없습니다: {path} (Docker 컨테이너는 uid 1000 으로 실행됩니다)"
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"설정 파일은 UTF-8 로 저장해야 합니다: {path}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"설정 파일 형식 오류: {exc}") from exc
     config = parse_live_config(data, path.resolve().parent)

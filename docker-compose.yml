@@ -12,7 +12,11 @@ services:
       - GPS2CCTV_ITS_API_KEY=${GPS2CCTV_ITS_API_KEY:-}
       - TZ=Asia/Seoul
     volumes:
+      # config.toml 을 먼저 만드세요(없으면 Docker가 같은 이름의 폴더를 만들어 시작에 실패합니다).
+      # 컨테이너는 uid 1000 으로 실행되므로 파일을 0600 으로 두려면 소유자도 uid 1000 이어야 합니다.
       - ./config.toml:/config/config.toml:ro
+      # [[camera_files]] 를 쓰면 그 파일도 같은 폴더에 마운트하세요. 예:
+      # - ./my_cameras.json:/config/my_cameras.json:ro
       - gps2cctv-data:/data
 
 volumes:

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import math
 import tomllib
 from dataclasses import dataclass, fields, replace
 from pathlib import Path
@@ -42,6 +43,8 @@ class Settings:
     default_coverage_radius_m: float = 100.0
     # GPS 정확도 값이 없는 지점에 적용하는 보수적인 기본값.
     default_gps_accuracy_m: float = 25.0
+    # 이보다 부정확한 위치(기지국 위치 등)로 계산한 통과는 신뢰도 '낮음'
+    poor_gps_accuracy_m: float = 100.0
     # GPS 기록 시각 자체의 오차 여유.
     gps_time_margin_seconds: float = 2.0
     # 이보다 긴 GPS 공백은 직선 보간 대신 도달 가능 영역(시공간 프리즘)으로 계산한다.
@@ -76,6 +79,7 @@ class Settings:
             "max_incident_window_seconds",
             "default_coverage_radius_m",
             "default_gps_accuracy_m",
+            "poor_gps_accuracy_m",
             "max_gap_seconds",
             "gap_speed_factor",
             "gap_min_speed_mps",
@@ -122,8 +126,12 @@ def _coerce(name: str, default: Any, value: Any) -> Any:
             raise ConfigError(f"설정 {name} 은(는) 정수여야 합니다.")
         return value
     if isinstance(default, float):
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            raise ConfigError(f"설정 {name} 은(는) 숫자여야 합니다.")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise ConfigError(f"설정 {name} 은(는) 유한한 숫자여야 합니다.")
         return float(value)
     if isinstance(default, tuple):
         if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
@@ -144,6 +152,17 @@ def load_settings(path: Path | None) -> Settings:
         data = tomllib.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
         raise ConfigError(f"설정 파일이 없습니다: {path}") from exc
+    except IsADirectoryError as exc:
+        raise ConfigError(
+            f"설정 파일 자리에 폴더가 있습니다: {path} (Docker는 없는 파일을 폴더로 만듭니다. "
+            "config.toml 을 먼저 만드세요)"
+        ) from exc
+    except PermissionError as exc:
+        raise ConfigError(
+            f"설정 파일을 읽을 권한이 없습니다: {path} (Docker 컨테이너는 uid 1000 으로 실행됩니다)"
+        ) from exc
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"설정 파일은 UTF-8 로 저장해야 합니다: {path}") from exc
     except tomllib.TOMLDecodeError as exc:
         raise ConfigError(f"설정 파일 형식 오류: {exc}") from exc
 

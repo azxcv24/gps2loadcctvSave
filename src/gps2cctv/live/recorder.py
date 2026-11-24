@@ -86,7 +86,9 @@ class StreamTiming:
     pdt_uncertainty_seconds: float
     request_timeout_seconds: float = 10.0
     # PROGRAM-DATE-TIME 이 이 범위를 벗어나면(미래이거나 너무 과거) 인코더 시계가 틀린 것으로 보고 버린다.
-    max_latency_seconds: float = 120.0
+    max_latency_seconds: float = 900.0
+    # 시각 태그가 받은 시각보다 이만큼 넘게 미래면(인코더 시계가 빠름) 태그를 버린다.
+    max_future_seconds: float = 5.0
 
 
 class StreamRecorder:
@@ -131,7 +133,7 @@ class StreamRecorder:
 
     @property
     def alive(self) -> bool:
-        return self.status in ("starting", "recording")
+        return self.status in ("starting", "recording") and not self._stop.is_set()
 
     # --- 정리 ---------------------------------------------------------------
     def prune(self, keep_after: datetime, pinned: list[tuple[datetime, datetime]]) -> int:
@@ -307,17 +309,20 @@ class HlsRecorder(StreamRecorder):
             self.mapping_used.add(mapping)
             previous, chain_ok = buffered, mapping == "receive_time"
             self.last_sequence = seg.sequence
-        self.status = "recording"
+        if not self._stop.is_set():
+            self.status = "recording"
         return self.poll_interval
 
     def _pdt_plausible(self, new: list, fetched_at: datetime, anchored_end: datetime) -> bool:
         """시각 태그가 받은 시각과 앞뒤가 맞는지 확인한다(인코더 시계 오류·시간대 누락 대비)."""
         tagged = [s for s in new if s.program_date_time is not None]
-        if not tagged:
-            return False
+        if not tagged or self.pdt_rejected:
+            return False  # 한 번 버리기로 하면 끝까지 수신 시각으로(시각 기준이 섞이지 않게)
         newest_end = shift(tagged[-1].program_date_time, tagged[-1].duration)
         latency = seconds_between(newest_end, fetched_at)
-        if -2.0 <= latency <= self.timing.max_latency_seconds:
+        # 지연이 몇 분인 스트림도 있으므로 넓게 허용하고, 미래이거나(시계 빠름) 15분 넘게 과거
+        # (시간대 누락 등)일 때만 버린다.
+        if -self.timing.max_future_seconds <= latency <= self.timing.max_latency_seconds:
             return True
         skew = seconds_between(anchored_end, newest_end)
         if not self.pdt_rejected:
@@ -433,9 +438,10 @@ class FfmpegRecorder(StreamRecorder):
     def _scan(self) -> None:
         now = self.clock()
         try:
-            lines = self.list_path.read_text(encoding="utf-8", errors="replace").splitlines()
+            text = self.list_path.read_text(encoding="utf-8", errors="replace")
         except FileNotFoundError:
             return
+        lines = text.split("\n")[:-1]  # 줄바꿈으로 끝난(다 쓰인) 줄만 사용
         complete = [line for line in lines if line.count(",") >= 2]
         new_rows = complete[self._rows_seen :]
         if not new_rows:
@@ -449,8 +455,8 @@ class FfmpegRecorder(StreamRecorder):
                 except ValueError:
                     continue
                 path = self.buffer_dir / name
-                if self._raw and start < self._raw[-1][3] - 1.0:  # 스트림 시각이 되돌아감
-                    self._epoch += 1
+                if self._raw and abs(start - self._raw[-1][4]) > 1.0:
+                    self._epoch += 1  # 스트림 시각이 끊김(되돌아가거나 건너뜀): 새로 맞춘다
                 candidate = shift(now, -(lag + end))
                 base = self._bases.get(self._epoch)
                 if base is None or candidate < base:
@@ -463,7 +469,8 @@ class FfmpegRecorder(StreamRecorder):
                 self._raw.append((self._epoch, sequence, path, start, end, size))
             self._rows_seen = len(complete)
             self._rebuild()
-        self.status = "recording"
+        if not self._stop.is_set():
+            self.status = "recording"
 
     def _rebuild(self) -> None:
         unc = self.timing.delay_uncertainty_seconds + 0.5
